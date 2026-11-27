@@ -1,7 +1,14 @@
-fastapi
-uvicorn[standard]
-pydantic-settings
-python-multipart
-pytesseract
-Pillow
-PyMuPDF
+# Python 3.12.10 에서 설치·동작 확인한 버전 (2026-11-27, Windows 10 / CPU)
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+pydantic-settings==2.16.3
+python-multipart==0.0.34
+
+# OCR / 레이아웃 — paddlepaddle 3.3.x 는 이 CPU 에서 oneDNN 오류(ConvertPirAttribute2RuntimeAttribute)가 나서 3.2.2 로 고정
+paddlepaddle==3.2.2
+paddleocr==3.7.0
+
+# 전처리
+PyMuPDF==2.2
+Pillow==13.0.0
+olefile==0.47

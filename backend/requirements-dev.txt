@@ -1,0 +1,4 @@
+# 테스트용 (pip install -r requirements-dev.txt)
+-r requirements.txt
+pytest==9.2.0
+httpx2==2.16.2
