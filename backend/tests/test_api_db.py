@@ -47,12 +47,12 @@ def test_upload_too_big_413_message_from_settings(client, settings, tmp_path):
     assert _rows(settings, "uploaded_files") == []  # 검사를 통과하지 못하면 DB 에 남기지 않는다
 
 
-def test_upload_5mb_default_limit(client, settings, tmp_path):
-    assert settings.MAX_FILE_SIZE_MB == 5
-    path = samples.make_big_file(tmp_path / "big.png", 5)
+def test_upload_size_limit(client, settings, tmp_path):
+    limit = settings.MAX_FILE_SIZE_MB  # 기본값(config.py)이 바뀌어도 그 값 그대로 지켜지는지 확인한다
+    path = samples.make_big_file(tmp_path / "big.png", limit)
     with open(path, "rb") as f:
         r = client.post("/api/documents", files={"file": ("big.png", f, "image/png")})
-    assert r.status_code == 413 and "5MB" in r.json()["detail"]
+    assert r.status_code == 413 and f"{limit}MB" in r.json()["detail"]
 
 
 def test_upload_two_files_rejected(client, tmp_path):
@@ -189,4 +189,5 @@ def test_hwpx_upload_flow(client, settings, tmp_path):
     data = client.get(f"/api/documents/{doc['doc_id']}/blocks").json()
     assert all(b["bbox"] is None for b in data["blocks"])
     md = client.get(f"/api/documents/{doc['doc_id']}/result", params={"format": "md"}).text
-    assert '<td colspan="2">구분</td>' in md and '<td rowspan="2">1분기</td>' in md
+    assert "<table" not in md and "<td" not in md  # .md 에는 HTML 표를 섞지 않는다
+    assert "| 구분 |" in md and "| 1분기 |" in md

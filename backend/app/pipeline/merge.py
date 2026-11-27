@@ -2,7 +2,7 @@
 [3단계 — 이 파일이 하는 일]
 structure.json 의 order 순서대로 블록 결과를 이어 붙여 최종 결과를 만든다.
   - .txt : 순수 텍스트. 표는 탭(\t)으로 칸을 나눈다
-  - .md  : 제목은 #, 표는 Markdown 표(병합 셀이 있으면 HTML 표), 이미지는 자리표시자+링크
+  - .md  : 제목은 #, 표는 Markdown 표(병합 셀은 첫 칸에 글자, 나머지는 빈칸), 이미지는 자리표시자+링크
   - 옵션 : 페이지 구분선(--- page 2 ---), 디버그 모드(<!-- p1-b003 --> 주석)
 그리고 합친 .txt 를 DB extracted_texts 테이블에 저장한다.
 
@@ -11,8 +11,6 @@ structure.json 의 order 순서대로 블록 결과를 이어 붙여 최종 결�
 - [규칙 1] 순서는 오직 structure 의 order 로 정한다. 결과 파일이 만들어진 순서(처리 순서·retry 순서)는 보지 않는다.
 - [규칙 2] 실패한 블록은 내용을 짐작해 채우지 않고 [추출 실패: p1-b003] 로 표시한다. 블록을 빼먹지도 않는다.
 """
-import html
-
 from app import db
 from app.pipeline.storage import DocStorage, read_json
 
@@ -54,6 +52,13 @@ def _grid(table: dict):
     return grid
 
 
+def _piece_text(block_id: str, piece: dict, where: str) -> str:
+    """표 제목·표 밖 글자 한 조각. [규칙 2] 기준 미달이면 [추출 실패: p1-b003 표 밖] 으로 표시한다."""
+    if piece.get("status") == "failed":
+        return failure_marker(block_id, where)
+    return (piece.get("text") or "").replace("\n", " ")
+
+
 def table_to_tsv(block_id: str, table: dict) -> str:
     """표 → 탭 구분 텍스트. 병합으로 가려진 칸은 빈칸으로 둔다 (칸 수를 맞춰야 엑셀에 붙여 넣을 때 열이 밀리지 않는다)."""
     rows = []
@@ -65,31 +70,13 @@ def table_to_tsv(block_id: str, table: dict) -> str:
 
 def table_to_markdown(block_id: str, table: dict) -> str:
     """
-    표 → Markdown 표. 단, 병합 셀이 하나라도 있으면 HTML 표로 만든다.
-    Markdown 표 문법에는 병합 셀을 표현하는 방법이 없어서, 억지로 쪼개면 내용이 틀린 칸에 들어간 것처럼 보이기 때문.
+    표 → Markdown 표. .md 파일에는 항상 순수 Markdown 표만 쓴다 (HTML <table> 을 섞지 않는다).
+    Markdown 표 문법에는 병합 셀이 없으므로, 병합 칸의 글자는 첫 칸(왼쪽 위)에 두고 가려진 칸은 빈칸으로 둔다.
+    txt 의 탭 구분 표와 같은 규칙이라 두 결과의 칸 위치가 서로 맞는다.
     """
-    if not table["cells"]:
+    if not table["cells"] or not table.get("n_rows") or not table.get("n_cols"):
         return ""
-    has_span = any(c.get("rowspan", 1) > 1 or c.get("colspan", 1) > 1 for c in table["cells"])
     grid = _grid(table)
-    if has_span:
-        out = ["<table>"]
-        for row in grid:
-            out.append("  <tr>")
-            for c in row:
-                if isinstance(c, dict):
-                    attrs = ""
-                    if c.get("rowspan", 1) > 1:
-                        attrs += f' rowspan="{c["rowspan"]}"'
-                    if c.get("colspan", 1) > 1:
-                        attrs += f' colspan="{c["colspan"]}"'
-                    text = html.escape(_cell_text(block_id, c)).replace("\n", "<br>")
-                    out.append(f"    <td{attrs}>{text}</td>")
-                elif c is None:
-                    out.append("    <td></td>")
-            out.append("  </tr>")
-        out.append("</table>")
-        return "\n".join(out)
 
     def md_cell(c):
         text = _cell_text(block_id, c) if isinstance(c, dict) else ""
@@ -130,7 +117,11 @@ def render_block(block: dict, result: dict | None, fmt: str) -> str:
 
     if btype == "table":
         table = result.get("table") or {"cells": [], "n_rows": 0, "n_cols": 0}
-        return table_to_markdown(block_id, table) if fmt == "md" else table_to_tsv(block_id, table)
+        body = table_to_markdown(block_id, table) if fmt == "md" else table_to_tsv(block_id, table)
+        # 표 제목(맨 윗줄 전체 병합 칸이었던 글자)은 표 위에, 칸 밖 글자(자막·주석)는 표 아래에 쓴다
+        before = [_piece_text(block_id, table["caption"], "제목")] if table.get("caption") else []
+        after = [_piece_text(block_id, p, "표 밖") for p in result.get("outside_text") or []]
+        return "\n\n".join(s for s in before + [body] + after if s)
 
     text = result.get("text") or ""
     if btype == "title":

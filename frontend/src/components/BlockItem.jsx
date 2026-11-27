@@ -8,6 +8,59 @@
 import { useState } from 'react'
 import { BLOCK_TYPES, FAILURE_REASONS } from '../config'
 
+/** [규칙 2] 서버(merge.py)와 같은 실패 표시 */
+const failMark = (blockId, where) => `[추출 실패: ${blockId} ${where}]`
+
+const pieceText = (blockId, piece, where) => (piece.status === 'failed' ? failMark(blockId, where) : piece.text ?? '')
+
+/**
+ * 표 블록 결과(result.table)를 HTML 표로 그린다. 병합 칸(rowspan/colspan)도 그대로 살린다.
+ * 표 제목(caption)은 표 위에, 칸 밖 글자(자막 등, outside_text)는 표 아래에 둔다 — 다운로드 결과와 같은 순서.
+ */
+function TableView({ blockId, result }) {
+  const { n_rows: nRows, cells, caption } = result.table
+  const rows = Array.from({ length: nRows }, () => [])
+  for (const c of cells) if (c.row < nRows) rows[c.row].push(c)
+  rows.forEach((row) => row.sort((a, b) => a.col - b.col))
+  const outside = result.outside_text ?? []
+
+  return (
+    <div className="table-view">
+      {caption && <p className={`table-caption ${caption.status === 'failed' ? 'fail' : ''}`}>{pieceText(blockId, caption, '제목')}</p>}
+      <div className="table-scroll">
+        <table>
+          <tbody>
+            {rows.map((row, r) => (
+              <tr key={r}>
+                {row.map((c) => {
+                  const failed = c.status === 'failed'
+                  const Tag = r === 0 ? 'th' : 'td'
+                  return (
+                    <Tag
+                      key={c.col}
+                      rowSpan={c.rowspan > 1 ? c.rowspan : undefined}
+                      colSpan={c.colspan > 1 ? c.colspan : undefined}
+                      className={failed ? 'fail' : undefined}
+                      title={c.confidence != null ? `신뢰도 ${(c.confidence * 100).toFixed(1)}%` : undefined}
+                    >
+                      {failed ? failMark(blockId, `r${c.row + 1}c${c.col + 1}`) : c.text}
+                    </Tag>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {outside.map((p, i) => (
+        <p key={i} className={`table-outside ${p.status === 'failed' ? 'fail' : ''}`}>
+          {pieceText(blockId, p, '표 밖')}
+        </p>
+      ))}
+    </div>
+  )
+}
+
 export default function BlockItem({ block, selected, onSelect, onRetry, onEdit, registerItem }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
@@ -20,6 +73,9 @@ export default function BlockItem({ block, selected, onSelect, onRetry, onEdit, 
   const failed = block.status === 'failed'
   const edited = r?.edited_text != null
   const failedCells = r?.failed_cells ?? 0
+  // 표 블록은 글자(탭 구분) 대신 실제 표로 그린다. 한글 폭 때문에 탭으로는 열이 맞지 않기 때문.
+  // 사용자가 고친 내용(edited_text)은 자유 글자라 그대로 글자로 보여 준다
+  const showAsTable = block.type === 'table' && r?.status === 'done' && !edited && r?.table?.cells?.length > 0
 
   const startEdit = (e) => {
     e.stopPropagation()
@@ -78,6 +134,8 @@ export default function BlockItem({ block, selected, onSelect, onRetry, onEdit, 
             <button onClick={() => setEditing(false)}>취소</button>
           </div>
         </div>
+      ) : showAsTable ? (
+        <TableView blockId={block.block_id} result={r} />
       ) : (
         <pre className="rendered">{block.rendered}</pre>
       )}

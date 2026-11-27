@@ -45,8 +45,8 @@ class Settings(BaseSettings):
     LOG_BACKUP_DAYS: int = 14  # 날짜별 로그 파일을 며칠치 보관할지
 
     # ---- 업로드 제한 ----
-    MAX_FILE_SIZE_MB: int = 5
-    MAX_PAGES: int = 10
+    MAX_FILE_SIZE_MB: int = 10
+    MAX_PAGES: int = 20
 
     # ---- 처리 시간 / 워커 ----
     PROCESS_TIMEOUT_SEC: int = 30  # 파일 하나(1~3단계 전체)의 처리 시간 제한
@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     LAYOUT_MODEL: str = "PP-DocLayout_plus-L"
     LAYOUT_THRESHOLD: float = 0.5  # 레이아웃 검출 점수가 이보다 낮은 블록은 버린다
     TEXT_DET_MODEL: str = "PP-OCRv5_mobile_det"
+    # 글자 검출 상자 설정. 기본값(0.6 / 1.5)은 반투명 배경 위 한 자리 숫자("1", "4")를 놓치거나
+    # "6" 의 윗부분을 잘라 "b" 로 읽히게 했다. 낮은 box_thresh 로 흐린 글자도 잡고, unclip 을 키워 상자에 여유를 준다
+    TEXT_DET_BOX_THRESH: float = 0.3
+    TEXT_DET_UNCLIP_RATIO: float = 2.0
     TEXT_REC_MODEL_KO: str = "korean_PP-OCRv5_mobile_rec"
     TEXT_REC_MODEL_EN: str = "en_PP-OCRv5_mobile_rec"
     TABLE_MODEL: str = "SLANet_plus"

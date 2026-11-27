@@ -51,15 +51,31 @@ def test_merge_follows_order_field_not_file_order():
     assert merge_document(structure, results, "txt") == "첫째\n\n둘째\n"
 
 
-def test_merged_table_with_spans_becomes_html():
+def test_merged_table_with_spans_stays_markdown():
     table = {"n_rows": 2, "n_cols": 2, "cells": [
         {"row": 0, "col": 0, "rowspan": 1, "colspan": 2, "text": "병합", "status": "done"},
         {"row": 1, "col": 0, "rowspan": 1, "colspan": 1, "text": "a|b", "status": "done"},
         {"row": 1, "col": 1, "rowspan": 1, "colspan": 1, "text": "c", "status": "done"},
     ]}
     md = table_to_markdown("p1-b001", table)
-    assert '<td colspan="2">병합</td>' in md
+    assert md == "| 병합 |  |\n| --- | --- |\n| a\\|b | c |"  # HTML 없이, 병합 글자는 첫 칸·가려진 칸은 빈칸
     assert table_to_tsv("p1-b001", table) == "병합\t\na|b\tc"  # 가려진 칸은 빈칸으로 자리 유지
+
+
+def test_table_caption_and_outside_text_rendered():
+    structure = {"blocks": [{"block_id": "p1-b001", "order": 1, "page": 1, "type": "table"}]}
+    table = {"n_rows": 2, "n_cols": 2, "caption": {"text": "가격 비교", "status": "done"}, "cells": [
+        {"row": 0, "col": 0, "rowspan": 1, "colspan": 1, "text": "순위", "status": "done"},
+        {"row": 0, "col": 1, "rowspan": 1, "colspan": 1, "text": "가격", "status": "done"},
+        {"row": 1, "col": 0, "rowspan": 1, "colspan": 1, "text": "1", "status": "done"},
+        {"row": 1, "col": 1, "rowspan": 1, "colspan": 1, "text": "168원", "status": "done"},
+    ]}
+    outside = [{"text": "자막 글자", "status": "done"}, {"text": None, "raw_text": "??", "status": "failed"}]
+    results = {"p1-b001": {"status": "done", "table": table, "outside_text": outside}}
+    md = merge_document(structure, results, "md")
+    assert md == ("가격 비교\n\n| 순위 | 가격 |\n| --- | --- |\n| 1 | 168원 |\n\n자막 글자\n\n"
+                  "[추출 실패: p1-b001 표 밖]\n")
+    assert merge_document(structure, results, "txt").startswith("가격 비교\n\n순위\t가격\n1\t168원\n\n자막 글자")
 
 
 def test_db_saved_after_merge(tmp_path, run_doc, settings):

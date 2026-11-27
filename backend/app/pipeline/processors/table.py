@@ -141,12 +141,23 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
         return result
 
     per_cell, unassigned = assign_lines_to_cells(lines, cell_boxes)
-    failed_cells = 0
     for i, cell in enumerate(cells):
-        cell_lines = sort_lines(per_cell.get(i, []))
-        text = join_lines(cell_lines)
-        confidence = aggregate_confidence(cell_lines, ctx.settings.OCR_CONFIDENCE_AGG)
         cell["box"] = cell_boxes[i]
+        cell["_lines"] = per_cell.get(i, [])
+
+    cells, n_rows, n_cols, caption_cell = tidy_table(cells, n_rows, n_cols)
+    if source == "ocr":
+        reread = reread_empty_cells(ctx, crop, cells, threshold)
+        if reread:
+            lines = sort_lines(lines + reread)
+            result.update(lines=lines, raw_text=join_lines(lines))
+
+    agg = ctx.settings.OCR_CONFIDENCE_AGG
+    failed_cells = 0
+    for cell in cells:
+        cell_lines = sort_lines(cell.pop("_lines"))
+        text = join_lines(cell_lines)
+        confidence = aggregate_confidence(cell_lines, agg)
         cell["raw_text"] = text  # [규칙 2] 원본 OCR 결과는 항상 남긴다
         cell["confidence"] = confidence
         if not cell_lines:
@@ -156,15 +167,169 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
         cell.update(text=text if ok else None, status="done" if ok else "failed", failure_reason=reason)
         failed_cells += 0 if ok else 1
 
+    table = {"n_rows": n_rows, "n_cols": n_cols, "cells": cells}
+    if caption_cell is not None:
+        table["caption"] = _judged_piece(caption_cell.pop("_lines"), threshold, agg)
+
+    # 표 영역 안이지만 어느 칸에도 속하지 않는 글자(예: 영상 자막, 표 아래 주석).
+    # 버리면 글자가 소리 없이 사라지므로, 3단계에서 표 아래에 이어 쓴다
+    outside = [_judged_piece([line], threshold, agg) for line in sort_lines(unassigned)]
+
     result.update(
         status="done",
-        table={"n_rows": n_rows, "n_cols": n_cols, "cells": cells},
+        table=table,
         failed_cells=failed_cells,
         unassigned_lines=unassigned,
-        confidence=aggregate_confidence(lines, ctx.settings.OCR_CONFIDENCE_AGG),
+        outside_text=outside,
+        confidence=aggregate_confidence(lines, agg),
         processed_at=now(),
     )
     return result
+
+
+def _judged_piece(lines: list[dict], threshold: float, agg: str) -> dict:
+    """줄 묶음 → {"text", "raw_text", "confidence", "status"} ([규칙 2] 기준 미달이면 text=None, status=failed)."""
+    lines = sort_lines(lines)
+    text = join_lines(lines)
+    confidence = aggregate_confidence(lines, agg)
+    ok, reason = judge_text(text, confidence, threshold)
+    return {"text": text if ok else None, "raw_text": text, "confidence": confidence,
+            "status": "done" if ok else "failed", "failure_reason": reason}
+
+
+# ---------------------------------------------------------------------
+# 표 구조 다듬기
+# 표 구조 모델(SLANet_plus)은 선이 없거나 점선뿐인 표에서 열을 하나 더 만들어
+# 같은 열의 글자가 두 열에 지그재그로 흩어지게 하거나, 표 제목을 "전체 병합 행"으로, 표 아래 여백을 빈 행으로 잡는다.
+# 셀에 실제로 들어간 글자 줄을 보고 이런 경우만 골라 고친다.
+# ---------------------------------------------------------------------
+
+
+def _shift(cells: list[dict], key: str, after: int):
+    for c in cells:
+        if c[key] > after:
+            c[key] -= 1
+
+
+def tidy_table(cells: list[dict], n_rows: int, n_cols: int):
+    """
+    받는 값: 셀 목록(각 셀에 "box", "_lines"), 행 수, 열 수
+    돌려주는 값: (셀 목록, 행 수, 열 수, 표 제목 셀 또는 None)
+      1) 맨 윗행이 "전체 열을 덮는 칸 하나"뿐이고 글자가 있으면 표 제목으로 뺀다 (Markdown 표에는 병합 칸이 없기 때문)
+      2) 글자가 하나도 없는 행을 지운다 (병합에 걸친 행은 건드리지 않는다)
+      3) 이웃한 두 열이 "어느 행에서도 동시에 글자가 있지 않고" 칸 위치가 겹치면 같은 열로 보고 합친다
+    """
+    caption = None
+    top = [c for c in cells if c["row"] == 0]
+    if n_rows > 1 and len(top) == 1 and top[0]["colspan"] >= n_cols and top[0]["rowspan"] == 1 and top[0]["_lines"]:
+        caption = top[0]
+        cells = [c for c in cells if c is not caption]
+        _shift(cells, "row", -1)
+        n_rows -= 1
+
+    for r in reversed(range(n_rows)):
+        touching = [c for c in cells if c["row"] <= r < c["row"] + c["rowspan"]]
+        if all(c["row"] == r and c["rowspan"] == 1 and not c["_lines"] for c in touching):
+            cells = [c for c in cells if c not in touching]
+            _shift(cells, "row", r)
+            n_rows -= 1
+
+    merged = True
+    while merged and n_cols > 1:
+        merged = False
+        for col in range(n_cols - 1):
+            if _can_merge_columns(cells, col):
+                cells = _merge_columns(cells, col)
+                n_cols -= 1
+                merged = True
+                break
+    return cells, n_rows, n_cols, caption
+
+
+def _col_cells(cells: list[dict], col: int) -> list[dict]:
+    return [c for c in cells if c["col"] <= col < c["col"] + c["colspan"]]
+
+
+def _can_merge_columns(cells: list[dict], col: int, min_overlap: float = 0.2) -> bool:
+    left, right = _col_cells(cells, col), _col_cells(cells, col + 1)
+    if any(c["colspan"] != 1 or c["rowspan"] != 1 for c in left + right):
+        return False  # 병합 칸이 걸친 열은 의도된 구조일 수 있어 건드리지 않는다
+    left_by_row = {c["row"]: c for c in left}
+    if any(c["_lines"] and left_by_row.get(c["row"], {}).get("_lines") for c in right):
+        return False  # 같은 행에 둘 다 글자가 있으면 진짜 다른 열이다
+    if not any(c["_lines"] for c in left) or not any(c["_lines"] for c in right):
+        return True  # 한쪽 열이 통째로 비어 있으면 구조 모델이 만든 빈 열이다
+    # 둘 다 글자가 있는데 서로 다른 행에만 있다면, 칸 위치가 실제로 겹치는지(같은 세로 줄인지) 확인한다.
+    # 진짜 다른 열은 칸이 나란히 붙어 있을 뿐 거의 겹치지 않는다
+    ratios = []
+    for c in right:
+        lc = left_by_row.get(c["row"])
+        if lc is None:
+            continue
+        inter = min(lc["box"][2], c["box"][2]) - max(lc["box"][0], c["box"][0])
+        narrow = max(1e-6, min(lc["box"][2] - lc["box"][0], c["box"][2] - c["box"][0]))
+        ratios.append(max(0.0, inter) / narrow)
+    if not ratios:
+        return False
+    ratios.sort()
+    return ratios[len(ratios) // 2] >= min_overlap
+
+
+def _merge_columns(cells: list[dict], col: int) -> list[dict]:
+    """col+1 열의 칸을 col 열의 같은 행 칸에 합친다 (글자 줄을 옮기고 칸 상자는 두 상자를 감싸게 넓힌다)."""
+    left_by_row = {c["row"]: c for c in _col_cells(cells, col)}
+    keep = []
+    for c in cells:
+        if c["col"] == col + 1 and c["row"] in left_by_row:
+            lc = left_by_row[c["row"]]
+            lc["_lines"] = lc["_lines"] + c["_lines"]
+            lc["box"] = [min(lc["box"][0], c["box"][0]), min(lc["box"][1], c["box"][1]),
+                         max(lc["box"][2], c["box"][2]), max(lc["box"][3], c["box"][3])]
+            continue
+        if c["col"] == col + 1:
+            c["col"] = col
+        keep.append(c)
+    _shift(keep, "col", col)
+    return keep
+
+
+_MEANINGFUL_RE = re.compile(r"[0-9A-Za-z가-힣]")
+
+
+def reread_empty_cells(ctx: ProcessContext, crop, cells: list[dict], threshold: float) -> list[dict]:
+    """
+    글자 검출 모델은 반투명 배경 위의 한 자리 숫자("1", "4")처럼 작고 가는 글자를 놓친다.
+    같은 행 다른 칸에는 글자가 있는데 비어 있는 칸만, 그 열의 글자 가로 범위 × 그 행의 글자 세로 범위를 잘라
+    인식 모델에 직접 넣어 본다. 점수가 기준 이상이고 글자·숫자가 들어 있을 때만 채운다 (진짜 빈칸에 엉터리 글자가 들어가지 않게).
+    돌려주는 값: 새로 읽은 줄 목록 (셀의 "_lines" 에도 넣는다)
+    """
+    h, w = crop.shape[:2]
+    targets, images = [], []
+    for cell in cells:
+        if cell["_lines"] or cell["rowspan"] != 1 or cell["colspan"] != 1:
+            continue
+        row_lines = [l for c in cells if c["row"] == cell["row"] and c is not cell for l in c["_lines"]]
+        col_cells = [c for c in cells if c["col"] == cell["col"] and c["colspan"] == 1 and c["_lines"]]
+        if not row_lines or len(col_cells) < 2:
+            continue
+        col_lines = [l for c in col_cells for l in c["_lines"]]
+        x1 = max(0, int(min(l["box"][0] for l in col_lines)) - 4)
+        x2 = min(w, int(max(l["box"][2] for l in col_lines)) + 4)
+        y1 = max(0, int(min(l["box"][1] for l in row_lines)) - 2)
+        y2 = min(h, int(max(l["box"][3] for l in row_lines)) + 2)
+        if x2 - x1 < 4 or y2 - y1 < 4:
+            continue
+        targets.append((cell, [x1, y1, x2, y2]))
+        images.append(crop[y1:y2, x1:x2])
+    if not images:
+        return []
+    found = []
+    for (cell, box), rec in zip(targets, ctx.engines.recognize(images, ctx.language)):
+        if rec["confidence"] >= threshold and _MEANINGFUL_RE.search(rec["text"] or ""):
+            line = {**rec, "box": box, "reread": True}
+            cell["_lines"].append(line)
+            found.append(line)
+    return found
 
 
 def _plain(table: dict) -> str:
