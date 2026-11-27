@@ -48,7 +48,8 @@ def run_document(job: dict, engines, settings: Settings) -> None:
         stage = "layout"
         update_status(storage, stage="layout")
         with stage_log("layout", doc_id, name) as _:
-            structure = run_layout(prepared, storage, engines, {"doc_id": doc_id, "file_name": name, "language": job["language"]})
+            structure = run_layout(prepared, storage, engines, {"doc_id": doc_id, "file_name": name, "language": job["language"]},
+                                   settings.LAYOUT_SWEEP_UNCOVERED_TEXT, settings.LAYOUT_SWEEP_MIN_HEIGHT_RATIO)
         total = len(structure["blocks"])
         logger.info(f"블록 {total}개 검출", extra=log_ctx(doc_id, name, "layout"))
 

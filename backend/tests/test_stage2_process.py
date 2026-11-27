@@ -4,7 +4,7 @@
 import pytest
 
 from app.pipeline.engines import pick_language
-from app.pipeline.processors.table import assign_lines_to_cells, parse_table_tokens, reread_empty_cells, tidy_table
+from app.pipeline.processors.table import assign_lines_to_cells, parse_table_tokens, grid_from_lines, reread_empty_cells, structure_agrees, tidy_table
 from app.pipeline.storage import read_json
 from tests import samples
 from tests.fakes import FakeEngines
@@ -158,10 +158,12 @@ def test_reread_empty_cell_fills_missed_digit():
         class engines:
             @staticmethod
             def recognize(images, language):
-                assert len(images) == 3  # 빈 칸 3개: (1,0) (2,1) (3,0)
-                return [{"text": "1", "confidence": 0.99, "lang": "en", "candidates": None},
-                        {"text": "—", "confidence": 0.95, "lang": "ko", "candidates": None},
-                        {"text": "7", "confidence": 0.30, "lang": "en", "candidates": None}]
+                assert len(images) == 12  # 빈 칸 3개 (1,0) (2,1) (3,0) × 자르는 폭 2가지 × (원본, 보정)
+                def r(t, c):
+                    return {"text": t, "confidence": c, "lang": "en", "candidates": None}
+                return [r("1", 0.70), r("1", 0.60), r("1", 0.99), r("1", 0.50),  # 넷 중 점수가 높은 쪽을 쓴다
+                        r("—", 0.95), r("", 0.0), r("", 0.0), r("", 0.0),
+                        r("7", 0.30), r("7", 0.40), r("7", 0.20), r("7", 0.10)]
 
     cells = [_cell(0, 0, [0, 0, 50, 30], ["순위"]), _cell(0, 1, [50, 0, 150, 30], ["브랜드"]),
              _cell(1, 0, [0, 30, 50, 60]), _cell(1, 1, [50, 30, 150, 60], ["줌"]),
@@ -174,6 +176,65 @@ def test_reread_empty_cell_fills_missed_digit():
     assert [l["text"] for l in cells[2]["_lines"]] == ["1"] and cells[2]["_lines"][0]["reread"]
     assert cells[5]["_lines"] == []  # "—" 는 글자·숫자가 아니라 채우지 않는다
     assert cells[6]["_lines"] == []  # 점수가 기준 미달이면 채우지 않는다
+
+
+def test_reread_replaces_partially_detected_digit():
+    """흐린 "9" 의 일부만 검출돼 "•" 로 읽힌 칸은 다시 읽은 결과로 바꾼다. 긴 글자 칸은 건드리지 않는다."""
+    import numpy as np
+
+    class _Ctx:
+        language = "auto"
+
+        class engines:
+            @staticmethod
+            def recognize(images, language):
+                assert len(images) == 4  # "•" 칸 하나 × 폭 2가지 × (원본, 보정)
+                return [{"text": "9", "confidence": 0.98, "lang": "en", "candidates": None}] * 4
+
+    cells = [_cell(0, 0, [0, 0, 50, 60], ["8"]), _cell(0, 1, [50, 0, 150, 60], ["카포드"]),
+             _cell(1, 0, [0, 60, 50, 120], ["9"]), _cell(1, 1, [50, 60, 150, 120], ["피.잉크.우유"])]
+    cells[0]["_lines"][0]["box"] = [20, 22, 30, 32]  # 행 높이(60)의 절반도 안 되는 조각 상자
+    cells[0]["_lines"][0]["text"] = "•"
+    cells[1]["_lines"][0]["box"] = [60, 0, 140, 60]
+    cells[2]["_lines"][0]["box"] = [15, 60, 35, 120]
+    cells[3]["_lines"][0].update(box=[55, 60, 145, 120], confidence=0.7)  # 길어서 다시 읽지 않는다
+    found = reread_empty_cells(_Ctx(), np.zeros((120, 150, 3), np.uint8), cells, 0.8)
+    assert [l["text"] for l in cells[0]["_lines"]] == ["9"] and found[0]["replaced"] == ["•"]
+    assert cells[3]["_lines"][0]["text"] == "피.잉크.우유"
+
+
+def _row_lines(texts_xs, y, row):
+    return [{"text": t, "confidence": 0.99, "box": [x, y, x + 30, y + 30], "row": row} for t, x in texts_xs]
+
+
+def test_grid_from_lines_rebuilds_rows_and_caption():
+    """구조 모델이 행을 잘못 나눠도, 글자 줄 위치만으로 행·열과 제목·표 밖 글자를 나눈다."""
+    lines = (
+        [{"text": "곰", "confidence": 0.53, "box": [0, 0, 60, 60], "row": 0},
+         {"text": "종합 순위", "confidence": 0.98, "box": [110, 10, 225, 50], "row": 0}]  # 두 열에 걸친 제목
+        + _row_lines([("순위", 0), ("브랜드", 100), ("와인", 200)], 70, 1)
+        + _row_lines([("1", 0), ("프로쉬", 100), ("1", 200)], 110, 2)
+        + _row_lines([("2", 0), ("퍼실", 100)], 150, 3)  # 와인 칸을 검출이 놓침
+        + _row_lines([("3", 0), ("다우니", 100), ("2", 200)], 190, 4)
+        + [{"text": "다만 혈흔 제거 능력은", "confidence": 0.99, "box": [0, 240, 260, 270], "row": 5}]
+    )
+    grid = grid_from_lines(lines)
+    assert (grid["n_rows"], grid["n_cols"]) == (4, 3)
+    cells = {(c["row"], c["col"]): [l["text"] for l in c["_lines"]] for c in grid["cells"]}
+    assert cells[(0, 0)] == ["순위"] and cells[(1, 1)] == ["프로쉬"] and cells[(2, 2)] == [] and cells[(3, 2)] == ["2"]
+    assert [l["text"] for l in grid["head"]] == ["곰", "종합 순위"]
+    assert [l["text"] for l in grid["tail"]] == ["다만 혈흔 제거 능력은"]
+
+    # 구조 모델이 순위 1~3 을 한 칸에 넣었다면 = 서로 다른 행이 한 칸에 → 구조 모델 결과를 쓰지 않는다
+    rank_lines = [l for c in grid["cells"] if c["col"] == 0 for l in c["_lines"]]
+    assert not structure_agrees([{"_lines": rank_lines}], grid)
+    assert structure_agrees([{"_lines": c["_lines"]} for c in grid["cells"]], grid)
+
+
+def test_grid_from_lines_none_for_plain_paragraph():
+    lines = [{"text": "문장 하나", "confidence": 0.99, "box": [0, 0, 300, 30], "row": 0},
+             {"text": "문장 둘", "confidence": 0.99, "box": [0, 40, 280, 70], "row": 1}]
+    assert grid_from_lines(lines) is None
 
 
 # ---------------- 실제 모델 ----------------

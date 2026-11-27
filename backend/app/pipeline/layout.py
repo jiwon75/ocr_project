@@ -116,7 +116,83 @@ def assign_block_ids(pages_blocks: list[tuple[int, list[dict]]]) -> list[dict]:
 # ---------------------------------------------------------------------
 
 
-def detect_page_blocks(engines, page_rgb: np.ndarray, page_info: dict) -> list[dict]:
+def _inside(box: list[float], bbox: list[float]) -> bool:
+    """글자 상자의 가운데 점이 블록 안에 있는지."""
+    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    return bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]
+
+
+def _mostly_inside(box: list[float], bbox: list[float], ratio: float = 0.7) -> bool:
+    """글자 상자 넓이의 ratio 이상이 블록 안에 있는지."""
+    iw = min(box[2], bbox[2]) - max(box[0], bbox[0])
+    ih = min(box[3], bbox[3]) - max(box[1], bbox[1])
+    area = max(1e-6, (box[2] - box[0]) * (box[3] - box[1]))
+    return iw > 0 and ih > 0 and iw * ih / area >= ratio
+
+
+def _table_from_boxes(boxes: list[list[float]]) -> list[float] | None:
+    """
+    글자 상자들이 행·열로 가지런하면(3행 2열 이상) 표 영역을 돌려준다. 아니면 None.
+    2단계 표 처리와 같은 방법(processors.table.grid_from_lines)으로 판단한다.
+    """
+    from app.pipeline.processors.common import sort_lines
+    from app.pipeline.processors.table import grid_from_lines
+
+    grid = grid_from_lines(sort_lines([{"text": "", "box": list(b)} for b in boxes]))
+    if grid is None or grid["n_rows"] < 3 or grid["n_cols"] < 2:
+        return None
+    inner = [l["box"] for c in grid["cells"] for l in c["_lines"]]
+    return [min(b[0] for b in inner), min(b[1] for b in inner), max(b[2] for b in inner), max(b[3] for b in inner)]
+
+
+def uncovered_text_blocks(engines, page_rgb: np.ndarray, blocks: list[dict], source: str, min_height_ratio: float = 0.0) -> list[dict]:
+    """
+    레이아웃 모델이 놓친 글자를 찾는다. (실제 사례: 영상 캡처 아래쪽 자막을 아무 블록으로도 잡지 않아 결과에서 통째로 빠졌다)
+    페이지 전체에서 글자 줄을 검출하고, 어느 블록에도 속하지 않는 줄을
+      1) 행·열로 가지런히 놓여 있으면 표 블록 하나로 묶는다
+         (실제 사례: 빨간 강조 테두리가 있는 표를 레이아웃 모델이 못 잡아, 칸 글자 95개가 낱개 블록으로 쪼개졌다)
+      2) 나머지는 페이지 높이의 min_height_ratio 보다 작은 글자(영상 플레이어의 재생 시간 등)를 버리고,
+         가로로 가까운 것끼리 묶어 text 블록으로 만든다.
+    여기서는 위치만 정한다. 글자는 2단계에서 다른 블록과 똑같이 읽고 [규칙 2]로 판정한다.
+    이 bbox 는 실제로 검출된 글자 상자를 감싼 것이라 추측이 아니다 ([규칙 3]).
+    """
+    # 블록에 70% 이상 들어간 글자만 "블록 안"으로 본다. 블록 가장자리에 반쯤 걸친 글자는 블록을 잘라 읽을 때
+    # 일부만 남아 엉뚱하게 읽힌다 (실제 사례: 표 블록에 반쯤 걸친 "귀곰" 로고가 표 안에서 "곰" 으로만 읽혔다)
+    # 표 블록이 아닌 블록은 예전처럼 가운데 점만 본다 (꼬리말 아이콘·제목처럼 상자가 블록보다 조금 큰 글자가 중복되지 않게)
+    def covered(b, blk):
+        return _mostly_inside(b, blk["bbox"]) if blk["type"] == "table" else _inside(b, blk["bbox"])
+
+    loose = [b for b in engines.detect_text(page_rgb) if not any(covered(b, blk) for blk in blocks)]
+    found = []
+    table_box = _table_from_boxes(loose)
+    if table_box is not None:
+        found.append({"type": "table", "label": "uncovered_table", "score": None,
+                      "bbox": [round(v, 1) for v in table_box], "source": source})
+        loose = [b for b in loose if not _inside(b, table_box)]
+    if min_height_ratio and page_rgb is not None:
+        min_h = page_rgb.shape[0] * min_height_ratio
+        loose = [b for b in loose if b[3] - b[1] >= min_h]
+    loose.sort(key=lambda b: ((b[1] + b[3]) / 2, b[0]))
+    groups: list[list[float]] = []  # 묶음마다 감싸는 상자
+    for b in loose:
+        h = b[3] - b[1]
+        for g in groups:
+            same_line = min(b[3], g[3]) - max(b[1], g[1]) > 0.5 * min(h, g[3] - g[1])
+            near = b[0] - g[2] < 2 * h and g[0] - b[2] < 2 * h
+            if same_line and near:
+                g[:] = [min(g[0], b[0]), min(g[1], b[1]), max(g[2], b[2]), max(g[3], b[3])]
+                break
+        else:
+            groups.append(list(b))
+    return found + [
+        {"type": "text", "label": "uncovered_text", "score": None,
+         "bbox": [round(v, 1) for v in g], "source": source}
+        for g in groups
+    ]
+
+
+def detect_page_blocks(engines, page_rgb: np.ndarray, page_info: dict, sweep_uncovered: bool = False,
+                       sweep_min_height_ratio: float = 0.0) -> list[dict]:
     """
     페이지 하나의 블록을 찾아 읽기 순서로 정렬해 돌려준다.
     블록을 하나도 못 찾으면 페이지 전체를 text 블록 하나로 둔다.
@@ -151,12 +227,15 @@ def detect_page_blocks(engines, page_rgb: np.ndarray, page_info: dict) -> list[d
                 "layout_fallback": True,
             }
         ]
+    elif sweep_uncovered and not page_info.get("text_layer"):
+        blocks += uncovered_text_blocks(engines, page_rgb, blocks, "ocr", sweep_min_height_ratio)
     return sort_reading_order(blocks)
 
 
-def run_layout(prepared: dict, storage: DocStorage, engines, doc_meta: dict) -> dict:
+def run_layout(prepared: dict, storage: DocStorage, engines, doc_meta: dict, sweep_uncovered: bool = False,
+               sweep_min_height_ratio: float = 0.0) -> dict:
     """
-    받는 값: 전처리 결과, 저장소, 엔진, {"doc_id", "file_name", "language"}
+    받는 값: 전처리 결과, 저장소, 엔진, {"doc_id", "file_name", "language"}, 블록 밖 글자 다시 찾기 여부
     돌려주는 값: structure dict (structure.json 에도 저장됨)
     """
     if prepared["kind"] == "hwp":
@@ -165,7 +244,7 @@ def run_layout(prepared: dict, storage: DocStorage, engines, doc_meta: dict) -> 
         pages_blocks = []
         for page in prepared["pages"]:  # 모든 페이지를 먼저 분석한다 (내용 처리는 2단계에서)
             page_rgb = load_page_rgb(storage.page_image(page["page"]))
-            pages_blocks.append((page["page"], detect_page_blocks(engines, page_rgb, page)))
+            pages_blocks.append((page["page"], detect_page_blocks(engines, page_rgb, page, sweep_uncovered, sweep_min_height_ratio)))
         blocks = assign_block_ids(pages_blocks)
 
     structure = {

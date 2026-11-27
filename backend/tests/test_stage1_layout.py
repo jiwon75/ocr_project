@@ -11,6 +11,39 @@ from tests import samples
 from tests.fakes import FakeEngines
 
 
+def test_uncovered_text_becomes_text_block():
+    """레이아웃 모델이 놓친 글자(예: 영상 자막)는 블록 밖 글자 상자를 묶어 text 블록으로 만든다."""
+    from app.pipeline.layout import uncovered_text_blocks
+
+    class _Det:
+        @staticmethod
+        def detect_text(page):
+            return [[10, 10, 90, 40],  # 표 블록 안 → 무시
+                    [100, 300, 200, 340], [215, 302, 330, 338],  # 자막 한 줄이 두 조각으로 검출됨 → 한 블록
+                    [600, 500, 640, 520]]  # 멀리 떨어진 글자 → 별도 블록
+    blocks = [{"type": "table", "bbox": [0, 0, 400, 200]}]
+    found = uncovered_text_blocks(_Det(), None, blocks, "ocr")
+    assert [b["bbox"] for b in found] == [[100, 300, 330, 340], [600, 500, 640, 520]]
+    assert all(b["type"] == "text" and b["label"] == "uncovered_text" for b in found)
+
+
+def test_uncovered_grid_becomes_one_table_block():
+    """레이아웃 모델이 표를 못 잡아도, 블록 밖 글자가 행·열로 가지런하면 낱개 블록이 아니라 표 블록 하나가 된다."""
+    import numpy as np
+    from app.pipeline.layout import uncovered_text_blocks
+
+    grid = [[100 + c * 100, 100 + r * 50, 130 + c * 100, 130 + r * 50] for r in range(4) for c in range(3)]
+    tiny = [[10, 980, 60, 990]]  # 페이지 높이의 1% — 플레이어 재생 시간 같은 작은 글자
+
+    class _Det:
+        @staticmethod
+        def detect_text(page):
+            return grid + tiny + [[300, 700, 600, 760]]  # 큰 자막 한 줄
+
+    found = uncovered_text_blocks(_Det(), np.zeros((1000, 1000, 3), np.uint8), [], "ocr", 0.03)
+    assert [(b["type"], b["bbox"]) for b in found] == [("table", [100, 100, 330, 280]), ("text", [300, 700, 600, 760])]
+
+
 def _b(name, x1, y1, x2, y2):
     return {"name": name, "bbox": [x1, y1, x2, y2]}
 

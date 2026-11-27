@@ -272,7 +272,7 @@ def get_result(request: Request, doc_id: str, format: str = "txt", page_separato
         raise HTTPException(409, "아직 처리가 끝나지 않았거나 실패한 문서입니다.")
     structure = load_structure(storage)
     sep = settings.MERGE_PAGE_SEPARATOR if page_separator is None else page_separator
-    text = merge_document(structure, load_results(storage, structure), format, sep, debug)
+    text = merge_document(structure, load_results(storage, structure), format, sep, debug, settings.MERGE_SKIP_PAGE_FURNITURE)
     media = "text/markdown; charset=utf-8" if format == "md" else "text/plain; charset=utf-8"
     return PlainTextResponse(text, media_type=media)
 

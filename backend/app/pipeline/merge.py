@@ -30,7 +30,12 @@ def image_marker(block_id: str) -> str:
 
 
 def _cell_text(block_id: str, cell: dict) -> str:
-    """셀 하나의 표시 글자. 실패한 셀은 [추출 실패: p1-b003 r2c3] (r/c 는 사람이 보기 쉽게 1부터)."""
+    """
+    셀 하나의 표시 글자. 실패한 셀은 [추출 실패: p1-b003 r2c3] (r/c 는 사람이 보기 쉽게 1부터).
+    단 신뢰도만 기준 미달이고 TABLE_SHOW_UNCERTAIN_TEXT 가 켜져 있으면 읽은 글자 뒤에 (?) 를 붙인다 (예: "짧뽕 (?)").
+    """
+    if cell.get("status") == "failed" and cell.get("uncertain_text"):
+        return f"{cell['uncertain_text']} (?)"
     if cell.get("status") == "failed":
         return failure_marker(block_id, f"r{cell['row'] + 1}c{cell['col'] + 1}")
     return cell.get("text") or ""
@@ -136,15 +141,31 @@ def _title_prefix(block: dict, fmt: str) -> str:
     return "# " if block.get("label") == "doc_title" else "## "
 
 
-def merge_document(structure: dict, results: dict[str, dict], fmt: str = "txt", page_separator: bool = True, debug: bool = False) -> str:
+PAGE_FURNITURE_TYPES = ("header", "footer")  # 머리말·꼬리말·쪽번호 (layout.py 의 LABEL_TO_TYPE)
+
+
+def is_skipped(block: dict, skip_page_furniture: bool) -> bool:
+    """
+    결과 파일에서 뺄 블록인지.
+    이미지·PDF 에서 레이아웃 모델이 머리말·꼬리말·쪽번호로 잡은 블록은 본문이 아닌 경우가 많다
+    (실제 사례: 영상 캡처의 재생 시간 "10:10/11:54", 플레이어 아이콘). 화면에는 그대로 보여 준다.
+    HWP 의 머리말은 파일에 명시된 글자라 빼지 않는다.
+    """
+    return skip_page_furniture and block["type"] in PAGE_FURNITURE_TYPES and block.get("source") != "hwp"
+
+
+def merge_document(structure: dict, results: dict[str, dict], fmt: str = "txt", page_separator: bool = True, debug: bool = False,
+                   skip_page_furniture: bool = False) -> str:
     """
     블록 결과들을 order 순서로 이어 붙인다.
-    받는 값: structure, {block_id: 결과}, 형식, 페이지 구분선 여부, 디버그 여부
+    받는 값: structure, {block_id: 결과}, 형식, 페이지 구분선 여부, 디버그 여부, 머리말·꼬리말 블록 제외 여부
     돌려주는 값: 최종 문자열
     """
     parts: list[str] = []
     last_page = None
     for block in sorted(structure["blocks"], key=lambda b: b["order"]):  # [규칙 1] order 순서
+        if is_skipped(block, skip_page_furniture):
+            continue
         if page_separator and last_page is not None and block["page"] != last_page:
             parts.append(f"--- page {block['page']} ---")
         last_page = block["page"]
@@ -172,8 +193,9 @@ def merge_outputs(storage: DocStorage, settings) -> str:
     """
     structure = read_json(storage.structure_json)
     results = load_results(storage, structure)
-    txt = merge_document(structure, results, "txt", settings.MERGE_PAGE_SEPARATOR, False)
-    md = merge_document(structure, results, "md", settings.MERGE_PAGE_SEPARATOR, False)
+    skip = settings.MERGE_SKIP_PAGE_FURNITURE
+    txt = merge_document(structure, results, "txt", settings.MERGE_PAGE_SEPARATOR, False, skip)
+    md = merge_document(structure, results, "md", settings.MERGE_PAGE_SEPARATOR, False, skip)
     storage.output_dir.mkdir(parents=True, exist_ok=True)
     storage.output("txt").write_text(txt, encoding="utf-8")
     storage.output("md").write_text(md, encoding="utf-8")

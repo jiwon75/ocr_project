@@ -43,7 +43,11 @@ function TableView({ blockId, result }) {
                       className={failed ? 'fail' : undefined}
                       title={c.confidence != null ? `신뢰도 ${(c.confidence * 100).toFixed(1)}%` : undefined}
                     >
-                      {failed ? failMark(blockId, `r${c.row + 1}c${c.col + 1}`) : c.text}
+                      {failed
+                        ? c.uncertain_text
+                          ? `${c.uncertain_text} (?)`
+                          : failMark(blockId, `r${c.row + 1}c${c.col + 1}`)
+                        : c.text}
                     </Tag>
                   )
                 })}

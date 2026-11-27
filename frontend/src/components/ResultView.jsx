@@ -1,7 +1,7 @@
 /**
  * [이 파일이 하는 일]
  * 결과 화면(2분할). 왼쪽 = 원본 + bbox(PageViewer), 오른쪽 = 합쳐진 텍스트(블록 목록).
- * 위쪽 도구 막대: 복사, .txt/.md 다운로드, 페이지 구분선/디버그 옵션.
+ * 위쪽 도구 막대: 다른 파일 올리기(업로드 화면으로), 복사, .txt/.md 다운로드, 페이지 구분선/디버그 옵션.
  *
  * [양쪽 연결(하이라이트) 방법]
  * 선택된 블록 번호(selected)를 이 컴포넌트가 들고 있고, 양쪽 모두 그 값을 보고 하이라이트한다.
@@ -57,6 +57,10 @@ export default function ResultView({ docId, data, fileName, onRetry, onEdit, onR
   return (
     <section className="result">
       <div className="toolbar card">
+        {/* 업로드 화면으로 돌아가는 버튼. 도구 막대 맨 앞에 눈에 띄게 둔다 (예전 "새 파일" 버튼은 다른 버튼들 사이에 묻혀 안 보였다) */}
+        <button className="primary back-to-upload" onClick={onReset}>
+          ← 다른 파일 올리기
+        </button>
         <strong className="grow">
           {fileName} · 블록 {data.blocks.length}개{failedCount > 0 && <span className="danger-text"> · 추출 실패 {failedCount}개</span>}
         </strong>
@@ -69,7 +73,6 @@ export default function ResultView({ docId, data, fileName, onRetry, onEdit, onR
         <button onClick={copy}>복사</button>
         <button onClick={() => download('txt')}>.txt 다운로드</button>
         <button onClick={() => download('md')}>.md 다운로드</button>
-        <button onClick={onReset}>새 파일</button>
         {notice && <span className="notice">{notice}</span>}
       </div>
 

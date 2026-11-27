@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     OCR_CONFIDENCE_THRESHOLD: float = 0.8  # [규칙 2] 이 값보다 낮으면 "추출 실패"
     OCR_CONFIDENCE_AGG: Literal["mean", "min"] = "mean"  # 블록 안 여러 줄의 점수를 합치는 방법 (평균/최솟값)
     TABLE_STRUCTURE_THRESHOLD: float = 0.5  # 표 구조 인식 점수가 이보다 낮으면 표 블록 실패
+    # 표 칸의 신뢰도가 기준 미달일 때 [추출 실패: ...] 대신 읽은 글자 뒤에 (?) 를 붙여 보여 줄지 (예: "짧뽕 (?)")
+    TABLE_SHOW_UNCERTAIN_TEXT: bool = True
+    # 레이아웃 블록 어디에도 속하지 않은 글자(예: 영상 자막)를 페이지 전체에서 다시 찾아 글자 블록으로 추가할지
+    LAYOUT_SWEEP_UNCOVERED_TEXT: bool = True
+    # 그렇게 찾은 글자 중 높이가 페이지 높이의 이 비율보다 작은 것은 버린다 (영상 플레이어의 재생 시간 같은 작은 화면 글자).
+    # 표 모양으로 묶이는 글자는 이 기준과 상관없이 표 블록이 된다
+    LAYOUT_SWEEP_MIN_HEIGHT_RATIO: float = 0.03
 
     # ---- 전처리 ----
     PDF_RENDER_DPI: int = 200  # PDF 페이지를 이미지로 바꿀 해상도. 높을수록 정확하지만 느려진다
@@ -79,6 +86,8 @@ class Settings(BaseSettings):
 
     # ---- 결과 합치기 ----
     MERGE_PAGE_SEPARATOR: bool = True  # DB 에 저장하는 .txt 에 페이지 구분선을 넣을지 (기본값)
+    # 레이아웃 모델이 머리말·꼬리말·쪽번호로 잡은 블록(이미지·PDF)을 .txt/.md 결과에서 뺄지. 화면에는 그대로 보인다
+    MERGE_SKIP_PAGE_FURNITURE: bool = True
 
     # env_file: 읽을 .env 위치. extra="ignore": .env 에 모르는 항목이 있어도 오류 내지 않음
     model_config = SettingsConfigDict(

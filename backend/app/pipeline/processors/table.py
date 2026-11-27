@@ -15,6 +15,9 @@
 """
 import re
 
+import numpy as np
+from PIL import Image, ImageOps
+
 from app.pipeline.processors.common import (
     ProcessContext,
     aggregate_confidence,
@@ -130,8 +133,27 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
 
     cells, n_rows, n_cols = parse_table_tokens(structure["tokens"])
     cell_boxes = structure["cells"][: len(cells)]
-    if not cells or len(cell_boxes) < len(cells) or structure["score"] < ctx.settings.TABLE_STRUCTURE_THRESHOLD:
-        # 구조를 못 알아내면 표 전체를 실패로 둔다. 글자만 한 줄로 이어 붙이면 표의 의미가 망가지기 때문
+    structure_ok = bool(cells) and len(cell_boxes) >= len(cells) and structure["score"] >= ctx.settings.TABLE_STRUCTURE_THRESHOLD
+    # 이미지 OCR 은 글자 줄 위치로도 표 칸을 만들어 본다. 구조 모델이 틀렸을 때 대신 쓰기 위해서다
+    line_grid = grid_from_lines(lines) if source == "ocr" else None
+
+    if structure_ok:
+        per_cell, unassigned = assign_lines_to_cells(lines, cell_boxes)
+        for i, cell in enumerate(cells):
+            cell["box"] = cell_boxes[i]
+            cell["_lines"] = per_cell.get(i, [])
+    if line_grid is not None and (not structure_ok or not structure_agrees(cells, line_grid)):
+        # 구조 모델이 서로 다른 행의 글자를 한 칸에 넣었다 = 행·열을 잘못 나눴다. 글자 줄 위치로 만든 칸을 쓴다
+        cells, n_rows, n_cols = line_grid["cells"], line_grid["n_rows"], line_grid["n_cols"]
+        caption_lines, unassigned = line_grid["head"], line_grid["tail"]
+        result["grid_source"] = "lines"
+    elif structure_ok:
+        cells, n_rows, n_cols, caption_cell = tidy_table(cells, n_rows, n_cols)
+        caption_lines = caption_cell.pop("_lines") if caption_cell is not None else []
+        result["grid_source"] = "structure"
+    else:
+        # 구조도 못 알아내고 글자 줄로도 표 모양이 안 나오면 표 전체를 실패로 둔다.
+        # 글자만 한 줄로 이어 붙이면 표의 의미가 망가지기 때문
         result.update(
             status="failed",
             failure_reason="table_structure_failed",
@@ -140,12 +162,12 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
         )
         return result
 
-    per_cell, unassigned = assign_lines_to_cells(lines, cell_boxes)
-    for i, cell in enumerate(cells):
-        cell["box"] = cell_boxes[i]
-        cell["_lines"] = per_cell.get(i, [])
+    # 표 제목 줄 중 신뢰도 기준 미달인 조각(예: 화면 구석 로고의 일부)은 제목에서 뺀다. JSON 의 noise_lines 에 남긴다
+    noise = [l for l in caption_lines if l.get("confidence") is not None and l["confidence"] < threshold]
+    caption_lines = [l for l in caption_lines if l not in noise]
+    caption_cell = {"_lines": caption_lines} if caption_lines else None
+    result["noise_lines"] = noise
 
-    cells, n_rows, n_cols, caption_cell = tidy_table(cells, n_rows, n_cols)
     if source == "ocr":
         reread = reread_empty_cells(ctx, crop, cells, threshold)
         if reread:
@@ -165,6 +187,10 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
             continue
         ok, reason = judge_text(text, confidence, threshold)
         cell.update(text=text if ok else None, status="done" if ok else "failed", failure_reason=reason)
+        if not ok and reason == "low_confidence" and ctx.settings.TABLE_SHOW_UNCERTAIN_TEXT:
+            # 표 칸은 [추출 실패] 대신 읽은 글자에 (?) 를 붙여 보여 준다. 칸이 비면 표를 읽기 어렵기 때문.
+            # status 는 그대로 failed 라서 화면의 실패 셀 수·재시도 버튼은 그대로 동작한다
+            cell["uncertain_text"] = text
         failed_cells += 0 if ok else 1
 
     table = {"n_rows": n_rows, "n_cols": n_cols, "cells": cells}
@@ -185,6 +211,88 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
         processed_at=now(),
     )
     return result
+
+
+# ---------------------------------------------------------------------
+# 글자 줄 위치로 표 칸 만들기
+# 구조 모델(SLANet_plus)은 영상 캡처처럼 배경이 복잡한 표에서 칸 높이를 여러 행에 걸치게 잡아
+# 순위 1~5 가 한 칸에 뭉치거나 행이 밀리는 일이 있다. 반면 글자 검출·인식은 거의 정확했다.
+# 그래서 글자 줄을 세로 위치로 묶어 행을, 가로 위치로 묶어 열을 만든다. (병합 칸은 표현하지 못한다)
+# ---------------------------------------------------------------------
+
+
+def _x_overlap(a: list[float], b: list[float]) -> float:
+    """두 가로 구간이 겹치는 길이를 짧은 쪽 길이로 나눈 값 (0~1)."""
+    inter = min(a[1], b[1]) - max(a[0], b[0])
+    return max(0.0, inter) / max(1e-6, min(a[1] - a[0], b[1] - b[0]))
+
+
+def grid_from_lines(lines: list[dict]) -> dict | None:
+    """
+    받는 값: sort_lines 를 거친 줄 목록 (줄마다 "row" 가 있다)
+    돌려주는 값: {"cells", "n_rows", "n_cols", "head", "tail"} 또는 None(표 모양이 안 나올 때)
+      head: 표 위쪽 줄(제목 후보), tail: 표 아래쪽 줄(자막·주석 등)
+    방법
+      1) 줄 수가 가장 흔한 행들(= 칸이 다 찬 행)에서 i 번째 줄들의 가로 범위를 모아 i 번째 열로 삼는다
+      2) 모든 행의 줄을 가로로 가장 많이 겹치는 열에 넣는다
+      3) 줄이 하나뿐이거나 여러 열에 걸친 줄이 있는 행이 맨 위/아래에 있으면 표 밖으로 본다
+    """
+    rows: dict[int, list[dict]] = {}
+    for line in lines:
+        rows.setdefault(line.get("row", 0), []).append(line)
+    order = sorted(rows)
+    counts = [len(rows[r]) for r in order if len(rows[r]) >= 2]
+    if len(counts) < 2:
+        return None
+    k = max(counts, key=lambda c: (counts.count(c), c))  # 가장 흔한 줄 수 (같으면 큰 쪽)
+    full = [sorted(rows[r], key=lambda l: l["box"][0]) for r in order if len(rows[r]) == k]
+    if len(full) < 2:
+        return None
+    cols = [[min(row[i]["box"][0] for row in full), max(row[i]["box"][2] for row in full)] for i in range(k)]
+    if any(_x_overlap(cols[i], cols[i + 1]) > 0.5 for i in range(k - 1)):
+        return None  # 열끼리 크게 겹친다 = 줄이 세로로 가지런하지 않다 (표가 아니다)
+
+    def hits(line):
+        span = [line["box"][0], line["box"][2]]
+        return [i for i, col in enumerate(cols) if _x_overlap(span, col) > 0.3]
+
+    def is_table_row(row):
+        # 줄이 2개 이상이고, 여러 열에 걸친 줄이 없고, 열의 절반 이상을 채운 행만 표의 행으로 본다
+        col_hits = [hits(l) for l in row]
+        return len(row) >= 2 and all(len(h) == 1 for h in col_hits) and len({h[0] for h in col_hits}) * 2 >= k
+
+    table_rows = [r for r in order if is_table_row(rows[r])]
+    if len(table_rows) < 2:
+        return None
+    first, last = order.index(table_rows[0]), order.index(table_rows[-1])
+    head = [l for r in order[:first] for l in rows[r]]
+    tail = [l for r in order[last + 1:] for l in rows[r]]
+
+    cells = []
+    for gr, r in enumerate(order[first:last + 1]):
+        row = rows[r]
+        y1, y2 = min(l["box"][1] for l in row), max(l["box"][3] for l in row)
+        per_col: dict[int, list[dict]] = {}
+        for line in row:
+            span = [line["box"][0], line["box"][2]]
+            best = max(range(k), key=lambda i: (_x_overlap(span, cols[i]), -abs((span[0] + span[1]) - sum(cols[i]))))
+            per_col.setdefault(best, []).append(line)
+        for c in range(k):
+            cells.append({"row": gr, "col": c, "rowspan": 1, "colspan": 1,
+                          "box": [cols[c][0], y1, cols[c][1], y2], "_lines": per_col.get(c, [])})
+    return {"cells": cells, "n_rows": last - first + 1, "n_cols": k, "head": head, "tail": tail}
+
+
+def structure_agrees(cells: list[dict], line_grid: dict) -> bool:
+    """
+    구조 모델의 칸(cells, "_lines" 포함)이 글자 줄로 만든 행과 맞는지.
+    한 칸 안에 글자 줄 표의 서로 다른 두 행의 글자가 들어 있으면 구조 모델이 행을 잘못 나눈 것이다.
+    """
+    row_of = {id(l): c["row"] for c in line_grid["cells"] for l in c["_lines"]}
+    for cell in cells:
+        if len({row_of[id(l)] for l in cell.get("_lines", []) if id(l) in row_of}) > 1:
+            return False
+    return True
 
 
 def _judged_piece(lines: list[dict], threshold: float, agg: str) -> dict:
@@ -296,38 +404,88 @@ def _merge_columns(cells: list[dict], col: int) -> list[dict]:
 _MEANINGFUL_RE = re.compile(r"[0-9A-Za-z가-힣]")
 
 
+def _equalized_x2(piece: np.ndarray) -> np.ndarray:
+    """
+    흑백으로 바꿔 밝기 분포를 고르게 펴고(histogram equalization) 2배로 키운다.
+    흐린 배경 위 숫자에서 점수가 크게 올랐다 (실제 측정: "9" 0.64 → 0.90). 원본과 둘 다 읽어 점수가 높은 쪽을 쓴다.
+    """
+    im = ImageOps.equalize(ImageOps.grayscale(Image.fromarray(piece)))
+    im = im.resize((im.width * 2, im.height * 2), Image.BICUBIC).convert("RGB")
+    return np.asarray(im)
+
+
+def _needs_reread(cell: dict, row_lines: list[dict], threshold: float) -> bool:
+    """
+    다시 읽어 볼 칸인지.
+    - 비어 있는 칸: 검출 모델이 반투명 배경 위 한 자리 숫자("1", "4")를 놓친 경우
+    - 짧은 글자(3자 이하)인데 점수가 기준 미달이거나, 글자·숫자가 아니거나("•", "]"),
+      검출 상자가 행 높이의 절반도 안 되는 칸: 흐린 숫자의 일부만 검출돼 "9" 가 "•" 로, "7" 이 "]" 로 읽힌 경우 (실제 사례)
+    긴 글자(머리글·브랜드명)는 좁게 잘라 다시 읽으면 오히려 글자가 잘리므로 건드리지 않는다.
+    """
+    lines = cell["_lines"]
+    if not lines:
+        return True
+    text = " ".join(l["text"] for l in lines).strip()
+    if len(text) > 3:
+        return False
+    row_h = max(l["box"][3] for l in row_lines) - min(l["box"][1] for l in row_lines)
+    own_h = max(l["box"][3] for l in lines) - min(l["box"][1] for l in lines)
+    low = any(l.get("confidence") is not None and l["confidence"] < threshold for l in lines)
+    return low or not _MEANINGFUL_RE.search(text) or own_h < 0.5 * row_h
+
+
 def reread_empty_cells(ctx: ProcessContext, crop, cells: list[dict], threshold: float) -> list[dict]:
     """
-    글자 검출 모델은 반투명 배경 위의 한 자리 숫자("1", "4")처럼 작고 가는 글자를 놓친다.
-    같은 행 다른 칸에는 글자가 있는데 비어 있는 칸만, 그 열의 글자 가로 범위 × 그 행의 글자 세로 범위를 잘라
-    인식 모델에 직접 넣어 본다. 점수가 기준 이상이고 글자·숫자가 들어 있을 때만 채운다 (진짜 빈칸에 엉터리 글자가 들어가지 않게).
-    돌려주는 값: 새로 읽은 줄 목록 (셀의 "_lines" 에도 넣는다)
+    검출 모델이 놓쳤거나 일부만 잡은 칸을 다시 읽는다 (_needs_reread 참고).
+    그 열 글자들의 가운데를 중심으로 글자 폭만큼, 그 행의 글자 세로 범위만큼 잘라 인식 모델에 직접 넣는다.
+    - 열 전체 폭으로 자르면 빈 공간이 많아져 한 자리 숫자 점수가 0.5~0.7 로 떨어졌다 (실제 측정). 그래서 좁게 자른다
+    - 자르는 폭에 따라 "11" 이 "1" 로 읽히기도 해서, 폭을 두 가지로 잘라 둘 중 점수가 높은 결과를 쓴다
+    - 점수가 기준 이상이고 글자·숫자가 들어 있을 때만 채운다 (진짜 빈칸에 엉터리 글자가 들어가지 않게).
+      원래 글자가 "•" 처럼 의미 없는 기호였으면, 다시 읽은 결과가 기준 미달이어도 그것으로 바꿔 [추출 실패]로 드러나게 한다
+    돌려주는 값: 새로 읽은 줄 목록 (셀의 "_lines" 도 바꾼다)
     """
     h, w = crop.shape[:2]
     targets, images = [], []
     for cell in cells:
-        if cell["_lines"] or cell["rowspan"] != 1 or cell["colspan"] != 1:
+        if cell["rowspan"] != 1 or cell["colspan"] != 1:
             continue
-        row_lines = [l for c in cells if c["row"] == cell["row"] and c is not cell for l in c["_lines"]]
+        others = [l for c in cells if c["row"] == cell["row"] and c is not cell for l in c["_lines"]]
         col_cells = [c for c in cells if c["col"] == cell["col"] and c["colspan"] == 1 and c["_lines"]]
-        if not row_lines or len(col_cells) < 2:
+        if not others or len(col_cells) < 2 or not _needs_reread(cell, others + cell["_lines"], threshold):
             continue
         col_lines = [l for c in col_cells for l in c["_lines"]]
-        x1 = max(0, int(min(l["box"][0] for l in col_lines)) - 4)
-        x2 = min(w, int(max(l["box"][2] for l in col_lines)) + 4)
-        y1 = max(0, int(min(l["box"][1] for l in row_lines)) - 2)
-        y2 = min(h, int(max(l["box"][3] for l in row_lines)) + 2)
-        if x2 - x1 < 4 or y2 - y1 < 4:
-            continue
-        targets.append((cell, [x1, y1, x2, y2]))
-        images.append(crop[y1:y2, x1:x2])
+        y1 = max(0, int(min(l["box"][1] for l in others)) - 4)
+        y2 = min(h, int(max(l["box"][3] for l in others)) + 4)
+        centers = sorted((l["box"][0] + l["box"][2]) / 2 for l in col_lines)
+        widths = sorted(l["box"][2] - l["box"][0] for l in col_lines)
+        cx, med_w = centers[len(centers) // 2], widths[len(widths) // 2]
+        row_h = y2 - y1
+        for half in (max(med_w * 0.75, row_h * 0.55), max(med_w * 0.9, row_h * 0.8)):
+            x1, x2 = max(0, int(cx - half)), min(w, int(cx + half))
+            if x2 - x1 < 4 or row_h < 4:
+                break
+            piece = crop[y1:y2, x1:x2]
+            targets += [(cell, [x1, y1, x2, y2])] * 2
+            images += [piece, _equalized_x2(piece)]
     if not images:
         return []
-    found = []
+
+    best: dict[int, tuple[dict, dict, list]] = {}  # id(cell) → (cell, 가장 점수 높은 결과, 상자)
     for (cell, box), rec in zip(targets, ctx.engines.recognize(images, ctx.language)):
-        if rec["confidence"] >= threshold and _MEANINGFUL_RE.search(rec["text"] or ""):
-            line = {**rec, "box": box, "reread": True}
-            cell["_lines"].append(line)
+        if not _MEANINGFUL_RE.search(rec["text"] or ""):
+            continue
+        prev = best.get(id(cell))
+        if prev is None or rec["confidence"] > prev[1]["confidence"]:
+            best[id(cell)] = (cell, rec, box)
+
+    found = []
+    for cell, rec, box in best.values():
+        old = cell["_lines"]
+        old_text = " ".join(l["text"] for l in old).strip()
+        old_meaningless = bool(old) and not _MEANINGFUL_RE.search(old_text)
+        if rec["confidence"] >= threshold or old_meaningless:
+            line = {**rec, "box": box, "reread": True, "replaced": [l["text"] for l in old] or None}
+            cell["_lines"] = [line]
             found.append(line)
     return found
 
