@@ -109,6 +109,206 @@ def assign_lines_to_cells(lines: list[dict], cell_boxes: list[list[float]], min_
     return per_cell, unassigned
 
 
+def _ink_ratio(crop: np.ndarray, box: list[float]) -> float:
+    """
+    글자 상자 안쪽(가장자리 10~20% 뺀 곳)에서 "배경과 확실히 다른 점"의 비율.
+    반투명 워터마크(흰 바탕 위 연한 회색)는 거의 0 이고 진짜 글자는 0.1~0.3 정도다. 흰 바탕이 아니면 1.0 (따지지 않음).
+    """
+    x1, y1, x2, y2 = box
+    w, h = x2 - x1, y2 - y1
+    region = crop[max(0, int(y1 + h * 0.2)):max(0, int(y2 - h * 0.2)), max(0, int(x1 + w * 0.1)):max(0, int(x2 - w * 0.1))]
+    if region.size == 0:
+        return 0.0
+    rgb = region.reshape(-1, region.shape[-1])[:, :3].astype(int)
+    gray = rgb.mean(axis=1)
+    sat = rgb.max(axis=1) - rgb.min(axis=1)
+    red = (rgb[:, 0] > 150) & (rgb[:, 1] < 120) & (rgb[:, 2] < 120)
+    if np.median(gray) < 235 or ((sat > 60) & ~red).mean() > 0.05:
+        # 흰 바탕이 아니거나 색 글자다(배너 등). 워터마크는 흰 표 바탕 위의 연한 회색 글자라서 여기서는 따지지 않는다
+        # (실제 사례: 배너 글자 "누구나 평생 마르지 않는" 이 워터마크로 지워졌다)
+        return 1.0
+    # 흰 바탕: 진한 무채색 점만 글자. 연한 회색 칸 선·워터마크(밝기 150 이상)와 빨간 테두리(채도 큼)는 빼고 센다
+    return float(((gray < 150) & (sat < 60)).mean())
+
+
+# 진짜 글자는 0.07 이상(얇은 "1"·"7" 도 0.2 넘음), 워터마크는 0~0.055 였다 (오일 제원 표에서 잰 값).
+# 표마다 비교(중앙값의 30%)하는 방식은 어두운 표에서 "1" 같은 얇은 글자까지 지워서 고정값으로 바꿨다
+WATERMARK_INK_RATIO = 0.065
+
+
+def drop_stray_lines(lines: list[dict], crop: np.ndarray, bbox: list[float], offset: tuple[float, float]):
+    """
+    표 칸에 들어가면 안 되는 OCR 줄을 뺀다. (실제 사례: "그랑 콜레오스 오일 제원" 캡처)
+      1) 블록 밖 줄: 자를 때 둔 여백(CROP_PADDING_PX)에 걸린 위 블록 글자 ("…확인하십시오" 가 표 제목처럼 붙었다)
+      2) 워터마크: 표 위에 반투명하게 반복해 찍힌 "Oiltop" 이 "Oiton", "Ttop", "op" 로 읽혀 칸마다 끼었다.
+         글자 모양으로는 구분이 안 돼서, 획이 진한지(_ink_ratio)를 같은 표의 다른 줄과 비교한다
+      3) 다른 줄 2개 이상을 품은 큰 상자: 검출이 두 행을 한 상자로 잡아 "4.3"/"6.65" 위에 "43" 이 또 생겼다
+    돌려주는 값: (남길 줄, 버린 줄 — 버린 이유 "drop_reason" 포함)
+    """
+    if not lines:
+        return lines, []
+    ox, oy = offset
+    bx1, by1, bx2, by2 = bbox[0] - ox, bbox[1] - oy, bbox[2] - ox, bbox[3] - oy
+    ratios = [_ink_ratio(crop, l["box"]) for l in lines]
+    keep, dropped = [], []
+    for i, (line, ratio) in enumerate(zip(lines, ratios)):
+        x1, y1, x2, y2 = line["box"]
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        inner = sum(1 for j, o in enumerate(lines) if j != i and _overlap_ratio(o["box"], line["box"]) > 0.8)
+        if not (bx1 <= cx <= bx2 and by1 <= cy <= by2):
+            reason = "outside_block"
+        elif ratio < WATERMARK_INK_RATIO:
+            reason = "faint_watermark"
+        elif inner >= 2:
+            reason = "covers_other_lines"
+        else:
+            keep.append(line)
+            continue
+        dropped.append({**line, "drop_reason": reason})
+    return keep, dropped
+
+
+# ---------------------------------------------------------------------
+# 칸 선(괘선)으로 표 만들기
+# ---------------------------------------------------------------------
+
+
+def _rule_mask(crop: np.ndarray) -> np.ndarray:
+    """
+    칸 선일 수 있는 점: 흰 배경보다 어두운 무채색(연한 회색 선 포함) 또는 빨간 강조 테두리.
+    강조 테두리가 칸 선 바로 위에 덧그려져 회색 선을 가리는 경우가 많아 빨간색도 선으로 본다.
+    """
+    rgb = crop[:, :, :3].astype(int)
+    gray = rgb.mean(axis=2)
+    sat = rgb.max(axis=2) - rgb.min(axis=2)
+    red = (rgb[:, :, 0] > 150) & (rgb[:, :, 1] < 120) & (rgb[:, :, 2] < 120)
+    return ((gray < 215) & (sat < 40)) | red
+
+
+def _runs(profile: np.ndarray, threshold: float, merge_px: int = 4) -> list[float]:
+    """profile 값이 threshold 이상인 위치들을 붙어 있는 덩어리로 묶어 가운데 위치 목록으로 돌려준다."""
+    idx = np.flatnonzero(profile >= threshold)
+    out, start, prev = [], None, None
+    for i in idx:
+        if start is None:
+            start = prev = i
+        elif i - prev <= merge_px:
+            prev = i
+        else:
+            out.append((start + prev) / 2)
+            start = prev = i
+    if start is not None:
+        out.append((start + prev) / 2)
+    return out
+
+
+def ruled_grid(crop: np.ndarray, lines: list[dict]) -> dict | None:
+    """
+    칸 선이 그려진 표에서 선 위치로 행·열·병합 칸을 찾는다. 선이 부족하면 None (다른 방법을 쓴다).
+    (실제 사례: "그랑 콜레오스 오일 제원" 표. 구조 모델은 5열로 잘못 나누고, 글자 줄 방법은 "연료" 처럼
+     두 행에 걸친 병합 칸 때문에 행을 못 나눴다. 연한 회색 칸 선은 사람 눈에는 분명하다)
+    방법
+      1) 표 높이의 60% 이상 이어진 세로 선 → 열 경계
+      2) 열마다 그 열 폭의 70% 이상 이어진 가로 선 → 그 열의 칸 경계. 모든 열의 경계를 모으면 전체 행 경계
+         어떤 열에 가로 선이 없는 행 경계는 그 열의 칸이 위아래로 병합된 것 (rowspan)
+      3) 칸 안 세로 선이 칸 높이의 절반도 안 되면 옆 칸과 가로로 병합된 것 (colspan, 예: 머리글 "항목")
+      4) OCR 줄은 가운데 점이 들어간 칸에 넣는다. 표 위/아래 줄은 표 제목/표 밖 글자
+    돌려주는 값: grid_from_lines 와 같은 모양 {"cells", "n_rows", "n_cols", "head", "tail"}
+    """
+    if crop is None or crop.ndim != 3 or not lines:
+        return None
+    mask = _rule_mask(crop)
+    h, w = mask.shape
+    vx = _runs(mask.mean(axis=0), 0.6)
+    if len(vx) < 3:
+        return None
+    cols = [(a, b) for a, b in zip(vx, vx[1:]) if b - a > 15]
+    if len(cols) < 2:
+        return None
+    col_rules = []
+    for a, b in cols:
+        x1, x2 = int(a) + 3, int(b) - 2
+        col_rules.append(_runs(mask[:, x1:x2].mean(axis=1), 0.7))
+    # 전체 행 경계 = 모든 열의 가로 선을 모아 가까운 것끼리 합친 것
+    ys = sorted(y for rules in col_rules for y in rules)
+    bounds: list[float] = []
+    for y in ys:
+        if bounds and y - bounds[-1] <= 5:
+            continue
+        bounds.append(y)
+    if len(bounds) < 3:
+        return None
+    n_rows, n_cols = len(bounds) - 1, len(cols)
+
+    def near(y, rules):
+        return any(abs(y - r) <= 5 for r in rules)
+
+    # 열마다 칸 나누기 (행 병합). 맨 위·맨 아래 테두리가 없는 열도 표 전체 테두리를 쓴다
+    cells, owner = [], {}
+    for c, rules in enumerate(col_rules):
+        r = 0
+        while r < n_rows:
+            span = 1
+            while r + span < n_rows and not near(bounds[r + span], rules):
+                span += 1
+            cells.append({"row": r, "col": c, "rowspan": span, "colspan": 1,
+                          "box": [cols[c][0], bounds[r], cols[c][1], bounds[r + span]], "_lines": []})
+            r += span
+    # 가로 병합: 두 칸이 같은 행 범위이고 사이 세로 선이 거의 없으면 합친다
+    merged = True
+    while merged:
+        merged = False
+        for cell in cells:
+            right = next((o for o in cells if o["col"] == cell["col"] + cell["colspan"] and o["row"] == cell["row"]
+                          and o["rowspan"] == cell["rowspan"]), None)
+            if right is None:
+                continue
+            x = int(cols[cell["col"] + cell["colspan"] - 1][1])
+            y1, y2 = int(cell["box"][1]) + 3, int(cell["box"][3]) - 2
+            if y2 > y1 and mask[y1:y2, max(0, x - 2):x + 3].any(axis=1).mean() < 0.5:
+                cell["colspan"] += right["colspan"]
+                cell["box"][2] = right["box"][2]
+                cells.remove(right)
+                merged = True
+                break
+    head, tail, outside = [], [], 0
+    for line in lines:
+        x1, y1, x2, y2 = line["box"]
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        if cy < bounds[0]:
+            head.append(line)
+            continue
+        if cy > bounds[-1]:
+            tail.append(line)
+            continue
+        cell = next((c for c in cells if c["box"][0] <= cx <= c["box"][2] and c["box"][1] <= cy <= c["box"][3]), None)
+        if cell is None:
+            outside += 1
+            tail.append(line)
+            continue
+        cell["_lines"].append(line)
+    inside = len(lines) - len(head) - len(tail)
+    # 선으로 만든 칸에 글자 대부분이 들어가야 믿는다. 아니면(선이 표가 아닌 다른 것) 다른 방법에 맡긴다
+    if inside < 4 or outside > 0.1 * inside:
+        return None
+    # 글자가 하나도 없는 열이 있으면 표가 아닌 선(배너 테두리·화면 경계)까지 열로 잡은 것이다
+    filled_cols = {col for c in cells if c["_lines"] for col in range(c["col"], c["col"] + c["colspan"])}
+    if filled_cols != set(range(n_cols)):
+        return None
+    # 한 칸에 같은 높이의 줄이 나란히 2개 이상이면 선 없는 열이 더 있는 것이다 (머리글 줄에 세로 선이 없는 표)
+    for c in cells:
+        ls = c["_lines"]
+        for i in range(len(ls)):
+            for j in range(i + 1, len(ls)):
+                a, b = ls[i]["box"], ls[j]["box"]
+                if min(a[3], b[3]) - max(a[1], b[1]) > 0.5 * min(a[3] - a[1], b[3] - b[1]):
+                    return None
+    for cell in cells:
+        cell["box"] = [round(v, 1) for v in cell["box"]]
+    cells.sort(key=lambda c: (c["row"], c["col"]))
+    return {"cells": cells, "n_rows": n_rows, "n_cols": n_cols, "head": head, "tail": tail}
+
+
 def process_table_block(ctx: ProcessContext, block: dict) -> dict:
     """
     받는 값: 처리 상자, 표 블록
@@ -128,6 +328,10 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
     crop, offset = crop_block(ctx, block)
     structure = ctx.engines.table_structure(crop)
     lines, source = read_lines(ctx, block, crop, offset)
+    if source == "ocr":
+        lines, dropped = drop_stray_lines(lines, crop, block["bbox"], offset)
+        if dropped:
+            result["dropped_lines"] = dropped  # [규칙 2] 버린 줄도 결과 JSON 에는 남긴다 (화면·결과 파일에만 안 씀)
     lines = sort_lines(lines)
     result.update(source=source, lines=lines, raw_text=join_lines(lines), structure_score=structure["score"])
 
@@ -140,6 +344,8 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
     from_lines = source == "ocr" or block.get("label") == "uncovered_table"
     line_grid = grid_from_lines(lines) if from_lines else None
     force_lines = source == "text-layer" and line_grid is not None
+    # 칸 선이 그려진 이미지 표는 선 위치로 칸을 만든다 (가장 정확하다. 병합 칸도 선이 없는 곳으로 알 수 있다)
+    ruled = ruled_grid(crop, lines) if source == "ocr" else None
 
     if structure_ok:
         per_cell, unassigned = assign_lines_to_cells(lines, cell_boxes)
@@ -158,7 +364,11 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
         # 다듬은 뒤에도 열 수가 글자 줄 표와 다르면(제목·배너까지 표로 잡아 열이 늘어난 경우) 글자 줄 표를 쓴다
         or n_cols != line_grid["n_cols"]
     )
-    if use_lines:
+    if ruled is not None:
+        cells, n_rows, n_cols = ruled["cells"], ruled["n_rows"], ruled["n_cols"]
+        caption_lines, unassigned = ruled["head"], ruled["tail"]
+        result["grid_source"] = "rules"
+    elif use_lines:
         # 구조 모델이 서로 다른 행의 글자를 한 칸에 넣었다 = 행·열을 잘못 나눴다. 글자 줄 위치로 만든 칸을 쓴다
         cells, n_rows, n_cols = line_grid["cells"], line_grid["n_rows"], line_grid["n_cols"]
         caption_lines, unassigned = line_grid["head"], line_grid["tail"]
@@ -182,7 +392,9 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
         return result
 
 
-    if source == "ocr":
+    # 칸 선으로 만든 표(rules)는 다시 읽지 않는다. 다시 읽기는 "그 행 글자들의 세로 범위" 로 자르는데,
+    # 병합 칸("변속기 오일")이 있으면 범위가 여러 행으로 넓어져 "4.3" 이 아래 행 "6.65" 와 섞여 "43" 으로 바뀌었다
+    if source == "ocr" and result.get("grid_source") != "rules":
         reread = reread_empty_cells(ctx, crop, cells, threshold)
         if reread:
             lines = sort_lines(lines + reread)

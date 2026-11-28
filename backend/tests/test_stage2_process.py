@@ -329,3 +329,66 @@ def test_real_ocr_english_only_language(tmp_path, run_doc, real_engines):
     assert structure["language"] == "en"
     langs = {l.get("lang") for b in structure["blocks"] for l in (read_json(st.block_result(b["block_id"])) or {}).get("lines", [])}
     assert langs <= {"en", None}
+
+
+# ---------------- 칸 선 표 / 워터마크 (그랑 콜레오스 오일 제원 사례) ----------------
+
+
+def _ruled_image():
+    """흰 바탕에 연한 회색 칸 선 표: 3열 × 4행, 첫 열 2~3행은 병합(가운데 가로 선 없음)."""
+    import numpy as np
+
+    img = np.full((220, 400, 3), 255, np.uint8)
+    xs, ys = [10, 130, 260, 390], [10, 60, 110, 160, 210]
+    for x in xs:
+        img[10:211, x] = 180
+    for i, y in enumerate(ys):
+        x_from = 130 if i == 2 else 10  # 첫 열은 y=110 선이 없다 → 1~2행 병합
+        img[y, x_from:391] = 180
+    return img, xs, ys
+
+
+def _line(text, box, gray=30, img=None):
+    if img is not None:
+        x1, y1, x2, y2 = box
+        img[y1 + 4:y2 - 4, x1 + 4:x2 - 4:3] = gray  # 글자 획 흉내
+    return {"text": text, "confidence": 0.99, "box": list(box)}
+
+
+def test_ruled_grid_reads_merged_cells_from_rules():
+    from app.pipeline.processors.table import ruled_grid
+
+    img, xs, ys = _ruled_image()
+    lines = [
+        _line("항목", (30, 20, 100, 50), img=img), _line("값", (150, 20, 220, 50), img=img), _line("규격", (280, 20, 360, 50), img=img),
+        _line("냉각수", (30, 95, 100, 125), img=img),  # 두 행에 걸친 병합 칸 가운데
+        _line("GV120", (150, 70, 240, 100), img=img), _line("7.5", (280, 70, 330, 100), img=img),
+        _line("GV115", (150, 120, 240, 150), img=img), _line("13.9", (280, 120, 330, 150), img=img),
+        _line("연료", (30, 170, 100, 200), img=img), _line("2륜", (150, 170, 240, 200), img=img), _line("55", (280, 170, 330, 200), img=img),
+    ]
+    g = ruled_grid(img, lines)
+    assert g is not None and (g["n_rows"], g["n_cols"]) == (4, 3)
+    by_text = {l["text"]: c for c in g["cells"] for l in c["_lines"]}
+    assert by_text["냉각수"]["rowspan"] == 2 and by_text["냉각수"]["row"] == 1
+    assert (by_text["13.9"]["row"], by_text["13.9"]["col"]) == (2, 2)  # 값이 아래 행으로 밀리지 않는다
+
+
+def test_ruled_grid_needs_rules():
+    import numpy as np
+
+    from app.pipeline.processors.table import ruled_grid
+
+    img = np.full((200, 300, 3), 255, np.uint8)  # 선 없는 표
+    assert ruled_grid(img, [_line("a", (10, 10, 50, 40), img=img)]) is None
+
+
+def test_drop_stray_lines_removes_watermark_and_padding_text():
+    from app.pipeline.processors.table import drop_stray_lines
+
+    img, _, _ = _ruled_image()
+    real = _line("7.5", (280, 70, 330, 100), img=img)
+    mark = _line("Oiltop", (150, 70, 240, 100), gray=225, img=img)  # 연한 회색 워터마크
+    above = _line("확인하십시오", (20, 0, 200, 8), img=img)  # 블록 위 여백(위 블록의 글자)
+    keep, dropped = drop_stray_lines([real, mark, above], img, [12, 12, 400, 220], (0.0, 0.0))
+    assert [l["text"] for l in keep] == ["7.5"]
+    assert {d["text"]: d["drop_reason"] for d in dropped} == {"Oiltop": "faint_watermark", "확인하십시오": "outside_block"}
