@@ -3,7 +3,7 @@
 structure.json 의 order 순서대로 블록 결과를 이어 붙여 최종 결과를 만든다.
   - .txt : 순수 텍스트. 표는 탭(\t)으로 칸을 나눈다
   - .md  : 제목은 #, 표는 Markdown 표(병합 셀은 첫 칸에 글자, 나머지는 빈칸), 이미지는 자리표시자+링크
-  - 옵션 : 페이지 구분선(--- page 2 ---), 디버그 모드(<!-- p1-b003 --> 주석)
+  - 옵션 : 페이지 구분선(--- page 2 ---), 디버그 모드([블록 p1-b003] 표시)
 그리고 합친 .txt 를 DB extracted_texts 테이블에 저장한다.
 
 [왜 이렇게 나눴는지]
@@ -18,6 +18,11 @@ from app.pipeline.storage import DocStorage, read_json
 def failure_marker(block_id: str, cell: str | None = None) -> str:
     """[규칙 2] 실패 표시. 블록 번호를 함께 적어 어느 블록인지 바로 찾을 수 있게 한다."""
     return f"[추출 실패: {block_id} {cell}]" if cell else f"[추출 실패: {block_id}]"
+
+
+def debug_marker(block_id: str) -> str:
+    """디버그 모드에서 블록마다 앞에 붙이는 표시."""
+    return f"[블록 {block_id}]"
 
 
 def image_marker(block_id: str) -> str:
@@ -188,7 +193,9 @@ def merge_document(structure: dict, results: dict[str, dict], fmt: str = "txt", 
         last_page = block["page"]
         piece = render_block(block, result, fmt)
         if debug:
-            piece = f"<!-- {block['block_id']} -->\n{piece}"
+            # 예전에는 <!-- p1-b003 --> (HTML 주석)이었는데, .md 미리보기에서는 주석이 숨겨져 켜고 끈 결과가 똑같아 보였다.
+            # 어느 블록에서 나온 글인지 눈으로 찾는 게 목적이라 txt/md 모두 보이는 글자로 쓴다
+            piece = f"{debug_marker(block['block_id'])}\n{piece}"
         parts.append(piece)
     return "\n\n".join(parts).strip() + "\n"
 

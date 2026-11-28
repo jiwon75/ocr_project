@@ -119,6 +119,8 @@ export default function ResultView({ docId, data, fileName, onRetry, onEdit, onR
           {data.blocks.map((block, i) => (
             <div key={block.block_id}>
               {pageSeparator && i > 0 && block.page !== data.blocks[i - 1].page && <div className="page-sep">--- page {block.page} ---</div>}
+              {/* 블록 ID 주석(디버그): 내려받는 파일과 똑같이 화면에도 블록 앞에 [블록 p1-b003] 을 보여 준다 */}
+              {debug && <div className="debug-marker">[블록 {block.block_id}]</div>}
               <BlockItem
                 block={block}
                 selected={selected.id === block.block_id}

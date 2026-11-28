@@ -469,3 +469,10 @@ select {
 .table-view th.edited {
   background: #ebfbee;
 }
+
+.debug-marker {
+  font-family: monospace;
+  font-size: 12px;
+  color: #ae3ec9;
+  margin: 8px 0 2px;
+}

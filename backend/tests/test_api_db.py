@@ -113,7 +113,7 @@ def test_full_flow_and_extracted_texts_row(client, settings, tmp_path):
 
     txt = client.get(f"/api/documents/{doc['doc_id']}/result", params={"format": "txt"}).text
     md = client.get(f"/api/documents/{doc['doc_id']}/result", params={"format": "md", "debug": True}).text
-    assert "[추출 실패: p1-b003]" in txt and "<!-- p1-b001 -->" in md
+    assert "[추출 실패: p1-b003]" in txt and "[블록 p1-b001]" in md
 
     rows = _rows(settings, "extracted_texts")
     file_row = db.get_uploaded_file(settings.DB_PATH, doc["doc_id"])

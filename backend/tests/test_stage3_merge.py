@@ -45,7 +45,7 @@ def test_page_separator_and_debug(tmp_path, run_doc):
     assert "--- page 2 ---" in with_sep and "--- page 1 ---" not in with_sep
     assert "--- page" not in _merged(st, "txt", page_separator=False)
     debug = _merged(st, "md", page_separator=False, debug=True)
-    assert "<!-- p1-b001 -->" in debug and "<!-- p2-b001 -->" in debug
+    assert "[블록 p1-b001]" in debug and "[블록 p2-b001]" in debug
 
 
 def test_merge_follows_order_field_not_file_order():
