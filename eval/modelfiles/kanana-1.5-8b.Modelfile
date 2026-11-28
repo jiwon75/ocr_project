@@ -1,0 +1,27 @@
+# 카카오 Kanana 1.5 8B (Hugging Face GGUF) 를 Ollama 에서 제대로 쓰기 위한 설정
+#
+# 만들기:  ollama create kanana-1.5-8b -f eval/modelfiles/kanana-1.5-8b.Modelfile
+# 쓰기:    backend/.env 의 OLLAMA_MODEL=kanana-1.5-8b
+#
+# [왜 필요한지]
+# hf.co/... 로 바로 받으면 GGUF 안의 대화 형식(chat template)을 Ollama 가 그대로 쓰는데, Kanana 의 원래 형식에는
+# 도구 호출(function calling)용 복잡한 설정이 섞여 있어 Ollama 가 해석하지 못했다. 그 결과
+#   - JSON 으로만 답하게 하는 요청(교정 제안)이 500 오류 ("does not match the expected peg-native format")
+#   - 요약 끝에 내부 기호 <|eot_id|> 가 그대로 섞여 나옴
+# 원래 형식(kakaocorp/kanana-1.5-8b-instruct-2505 의 tokenizer_config.json)은 표준 Llama 3 형식이라
+# 그 부분만 남겨 아래에 적고, 답의 끝 표시(<|eot_id|>)에서 멈추게 한다.
+
+FROM hf.co/mradermacher/kanana-1.5-8b-instruct-2505-GGUF:Q4_K_M
+
+TEMPLATE """{{- if .System }}<|start_header_id|>system<|end_header_id|>
+
+{{ .System }}<|eot_id|>{{ end }}
+{{- range .Messages }}{{ if ne .Role "system" }}<|start_header_id|>{{ .Role }}<|end_header_id|>
+
+{{ .Content }}<|eot_id|>{{ end }}{{ end }}<|start_header_id|>assistant<|end_header_id|>
+
+"""
+
+PARAMETER stop "<|eot_id|>"
+PARAMETER stop "<|start_header_id|>"
+PARAMETER stop "<|end_header_id|>"
