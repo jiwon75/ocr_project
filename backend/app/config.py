@@ -89,6 +89,20 @@ class Settings(BaseSettings):
     # 레이아웃 모델이 머리말·꼬리말·쪽번호로 잡은 블록(이미지·PDF)을 .txt/.md 결과에서 뺄지. 화면에는 그대로 보인다
     MERGE_SKIP_PAGE_FURNITURE: bool = True
 
+    # ---- LLM 도우미 (Ollama: 내 PC 에서 돌리는 LLM 서버) — 요약·오타 교정 제안 ----
+    # 꺼 두거나 Ollama 가 안 켜져 있어도 OCR 은 그대로 동작한다. 화면의 요약/교정 버튼만 쓸 수 없다고 안내된다
+    LLM_ENABLED: bool = True
+    OLLAMA_URL: str = "http://localhost:11434"
+    # 이 PC(RTX 2060 6GB)에서 시험해 본 모델 중 한국어 품질·속도가 가장 나았던 것. 다른 모델은 `ollama list` 로 확인
+    OLLAMA_MODEL: str = "gemma4:e4b"
+    # 요청 하나를 기다려 줄 최대 시간(초). 첫 요청은 모델을 GPU/메모리에 올리느라 1~3분 걸릴 수 있다
+    OLLAMA_TIMEOUT_SEC: int = 300
+    # 긴 문서는 이 글자 수 단위로 나눠 LLM 에 보낸다 (한 번에 너무 많이 보내면 느려지고 뒷부분을 놓친다)
+    LLM_CHUNK_CHARS: int = 2500
+    # 교정 제안 안전장치: 틀린 부분과 고친 글자가 (자모 단위로) 이 비율 이상 닮아야 제안으로 받아 준다.
+    # LLM 이 비슷하게 생긴 글자가 아니라 아예 다른 단어로 바꾸는 것(예: 짬뽕 → 떡볶이)을 막는다
+    LLM_CORRECTION_MIN_SIMILARITY: float = 0.6
+
     # env_file: 읽을 .env 위치. extra="ignore": .env 에 모르는 항목이 있어도 오류 내지 않음
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env", env_file_encoding="utf-8", extra="ignore"

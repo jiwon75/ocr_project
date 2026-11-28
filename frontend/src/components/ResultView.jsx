@@ -9,10 +9,11 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
+import AssistPanel from './AssistPanel'
 import BlockItem from './BlockItem'
 import PageViewer from './PageViewer'
 
-export default function ResultView({ docId, data, fileName, onRetry, onEdit, onReset }) {
+export default function ResultView({ docId, data, fileName, onRetry, onEdit, onReset, onReload }) {
   const [selected, setSelected] = useState({ id: null, from: null })
   const [pageSeparator, setPageSeparator] = useState(true)
   const [debug, setDebug] = useState(false)
@@ -88,6 +89,8 @@ export default function ResultView({ docId, data, fileName, onRetry, onEdit, onR
           />
         </div>
         <div className="pane right">
+          {/* LLM 도우미(요약·오타 교정 제안). 교정 제안의 블록 번호를 누르면 왼쪽에서 그 블록을 보여 준다 */}
+          <AssistPanel docId={docId} onApplied={onReload} onSelectBlock={(id) => select(id, 'right')} />
           {data.blocks.map((block, i) => (
             <div key={block.block_id}>
               {pageSeparator && i > 0 && block.page !== data.blocks[i - 1].page && <div className="page-sep">--- page {block.page} ---</div>}

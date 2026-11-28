@@ -4,6 +4,7 @@
  *
  * - 텍스트는 서버가 합칠 때 쓰는 것과 똑같은 글자(rendered)를 보여 준다. 화면과 다운로드 결과가 달라지지 않게 하기 위해서다.
  * - [규칙 2] 수정은 edited_text 로만 저장된다. 원본 OCR 결과는 "원본 보기"로 언제든 확인할 수 있다.
+ * - 표 칸 하나만 고친 것(AI 도우미 교정 제안 수락)은 칸의 edited_text 에 저장되고, 표 안에서 색으로 표시한다.
  */
 import { useState } from 'react'
 import { BLOCK_TYPES, FAILURE_REASONS } from '../config'
@@ -39,17 +40,26 @@ function TableView({ blockId, result }) {
             {rows.map((row, r) => (
               <tr key={r}>
                 {row.map((c) => {
-                  const failed = c.status === 'failed'
+                  const cellEdited = c.edited_text != null
+                  const failed = c.status === 'failed' && !cellEdited
                   const Tag = r === 0 ? 'th' : 'td'
                   return (
                     <Tag
                       key={c.col}
                       rowSpan={c.rowspan > 1 ? c.rowspan : undefined}
                       colSpan={c.colspan > 1 ? c.colspan : undefined}
-                      className={failed ? 'fail' : undefined}
-                      title={c.confidence != null ? `신뢰도 ${(c.confidence * 100).toFixed(1)}%` : undefined}
+                      className={failed ? 'fail' : cellEdited ? 'edited' : undefined}
+                      title={
+                        cellEdited
+                          ? `수정됨 (원래 OCR: ${c.raw_text ?? ''})`
+                          : c.confidence != null
+                            ? `신뢰도 ${(c.confidence * 100).toFixed(1)}%`
+                            : undefined
+                      }
                     >
-                      {failed
+                      {cellEdited
+                        ? c.edited_text
+                        : failed
                         ? c.uncertain_text
                           ? `${c.uncertain_text} (?)`
                           : failMark(blockId, `r${c.row + 1}c${c.col + 1}`)
@@ -81,11 +91,13 @@ export default function BlockItem({ block, selected, onSelect, onRetry, onEdit, 
   const type = BLOCK_TYPES[block.type] ?? { label: block.type, color: '#495057' }
   const pending = block.status === 'pending'
   const failed = block.status === 'failed'
-  const edited = r?.edited_text != null
+  const blockEdited = r?.edited_text != null
+  const cellsEdited = r?.table?.cells?.some((c) => c.edited_text != null) ?? false
+  const edited = blockEdited || cellsEdited
   const failedCells = r?.failed_cells ?? 0
   // 표 블록은 글자(탭 구분) 대신 실제 표로 그린다. 한글 폭 때문에 탭으로는 열이 맞지 않기 때문.
   // 사용자가 고친 내용(edited_text)은 자유 글자라 그대로 글자로 보여 준다
-  const showAsTable = block.type === 'table' && r?.status === 'done' && !edited && r?.table?.cells?.length > 0
+  const showAsTable = block.type === 'table' && r?.status === 'done' && !blockEdited && r?.table?.cells?.length > 0
 
   const startEdit = (e) => {
     e.stopPropagation()

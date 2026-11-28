@@ -34,6 +34,9 @@ def _cell_text(block_id: str, cell: dict) -> str:
     셀 하나의 표시 글자. 실패한 셀은 [추출 실패: p1-b003 r2c3] (r/c 는 사람이 보기 쉽게 1부터).
     단 신뢰도만 기준 미달이고 TABLE_SHOW_UNCERTAIN_TEXT 가 켜져 있으면 읽은 글자 뒤에 (?) 를 붙인다 (예: "짧뽕 (?)").
     """
+    if cell.get("edited_text") is not None:
+        # 사용자가 칸 하나를 고친 것(LLM 교정 제안을 수락한 경우 등). [규칙 2] 원본 text/raw_text 는 그대로 남아 있다
+        return cell["edited_text"]
     if cell.get("status") == "failed" and cell.get("uncertain_text"):
         return f"{cell['uncertain_text']} (?)"
     if cell.get("status") == "failed":

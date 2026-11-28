@@ -171,6 +171,28 @@ copy .env.example .env
 
 `frontend/.env` 의 `VITE_MAX_FILE_SIZE_MB` 는 backend 의 `MAX_FILE_SIZE_MB` 와 같게 맞춰 주세요.
 
+### AI 도우미 (Ollama, 선택)
+
+결과 화면 오른쪽 위 **AI 도우미** 상자에서 문서 **요약**과 **오타 교정 제안**을 쓸 수 있습니다.
+내 PC 의 [Ollama](https://ollama.com) 를 쓰며, 꺼져 있거나 모델이 없으면 이유만 보여 주고 OCR 은 그대로 동작합니다.
+
+```powershell
+ollama pull gemma4:e4b   # 처음 한 번 (이미 있으면 생략)
+```
+
+| 항목 | 기본값 | 설명 |
+|---|---|---|
+| `LLM_ENABLED` | true | false 면 도우미를 끈다 |
+| `OLLAMA_URL` | http://localhost:11434 | Ollama 주소 |
+| `OLLAMA_MODEL` | gemma4:e4b | 이 PC(RTX 2060)에서 요약 4~5초, 교정 3~40초. 첫 요청은 모델 로딩으로 1~3분 |
+| `OLLAMA_TIMEOUT_SEC` | 300 | 요청 하나 최대 대기 시간 |
+| `LLM_CHUNK_CHARS` | 2500 | 긴 문서를 이 글자 수씩 나눠 보낸다 (요약은 부분 요약 → 합치기) |
+| `LLM_CORRECTION_MIN_SIMILARITY` | 0.6 | 교정 제안이 원래 글자와 (자모 기준) 이만큼 닮아야 받아 준다 |
+
+- 교정은 **제안만** 합니다. 체크해서 [적용] 한 것만 `edited_text`(블록, 또는 표 칸)에 저장되고 원본은 남습니다. "원래대로" 로 되돌릴 수 있습니다.
+- 숫자 오인식(`1DD` → `100`)은 규칙으로 찾고, 한글 오타는 LLM 이 찾습니다. LLM 이 엉뚱한 단어로 바꾸거나 숫자 자릿수를 바꾸는 제안은 자동으로 뺍니다.
+- 시험해 본 결과 작은 모델(gemma4:e4b)은 한글 오타를 놓치는 경우가 많습니다. qwen3.6 은 이 PC 에서 70~200초로 너무 느리고 더 낫지도 않았습니다.
+
 ---
 
 ## 5. 실행
@@ -220,6 +242,10 @@ npm run dev
 | PATCH | `/api/documents/{doc_id}/blocks/{block_id}` | `{"edited_text": "..."}` 사용자 수정 (null = 취소) |
 | GET | `/api/documents/{doc_id}/pages/{page}/image` | 원본 페이지 이미지 |
 | GET | `/api/documents/{doc_id}/result?format=txt\|md&page_separator=true&debug=false` | 최종 결과 |
+| GET | `/api/assist/status` | Ollama 연결·모델 설치 여부 |
+| GET | `/api/documents/{doc_id}/assist` | 요약·교정 제안 결과와 진행 상태 |
+| POST | `/api/documents/{doc_id}/assist/summary` · `/assist/corrections` | 요약 / 교정 제안 시작 (202, 백그라운드) |
+| POST | `/api/documents/{doc_id}/assist/corrections/apply` | `{"sids": [1, 3]}` 고른 제안 적용 |
 
 실패 예시: `{"status": "failed", "error": {"stage": "layout", "reason": "timeout (30s)", "message": "처리 시간이 제한(30초)을 넘어 중단되었습니다. ..."}}`
 

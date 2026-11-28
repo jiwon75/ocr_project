@@ -55,5 +55,12 @@ export const api = {
     return request(`/documents/${docId}/result?${q}`, { raw: true })
   },
 
+  // ---- LLM 도우미 (Ollama) — 선택 기능. 꺼져 있으면 assistStatus 의 message 에 이유가 온다 ----
+  assistStatus: () => request('/assist/status'),
+  assist: (docId) => request(`/documents/${docId}/assist`),
+  startAssist: (docId, kind) => request(`/documents/${docId}/assist/${kind}`, { method: 'POST' }),
+  applyCorrections: (docId, sids) =>
+    request(`/documents/${docId}/assist/corrections/apply`, { method: 'POST', body: JSON.stringify({ sids }) }),
+
   pageImageUrl: (docId, page) => `${API_URL}/documents/${docId}/pages/${page}/image`,
 }

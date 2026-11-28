@@ -78,7 +78,7 @@ export default function DocumentPage({ serverReady }) {
       {!docId && <UploadPanel onUpload={upload} busy={uploading} serverReady={serverReady} />}
       {docId && status && status.status !== 'done' && <ProgressPanel status={status} onReset={reset} />}
       {docId && status?.status === 'done' && data && (
-        <ResultView docId={docId} data={data} fileName={status.file_name} onRetry={retry} onEdit={edit} onReset={reset} />
+        <ResultView docId={docId} data={data} fileName={status.file_name} onRetry={retry} onEdit={edit} onReset={reset} onReload={() => loadBlocks(docId)} />
       )}
       {error && <p className="error">{error}</p>}
     </>
