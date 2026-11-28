@@ -160,9 +160,9 @@ copy .env.example .env
 
 | 항목 | 기본값 | 설명 |
 |---|---|---|
-| `MAX_FILE_SIZE_MB` | 5 | 업로드 최대 크기. 넘으면 413 + "파일 크기는 5MB 이하만 가능합니다." |
-| `MAX_PAGES` | 10 | PDF 최대 페이지 |
-| `PROCESS_TIMEOUT_SEC` | 30 | 파일 하나(1~3단계) 시간 제한 |
+| `MAX_FILE_SIZE_MB` | 20 | 업로드 최대 크기. 넘으면 413 + "파일 크기는 20MB 이하만 가능합니다." (스캔 PDF 20쪽 기준) |
+| `MAX_PAGES` | 20 | PDF 최대 페이지 |
+| `PROCESS_TIMEOUT_SEC` | 120 | 파일 하나(1~3단계) 시간 제한. 스캔본 20쪽 × 약 5초 = 약 100초 |
 | `OCR_CONFIDENCE_THRESHOLD` | 0.8 | 이보다 낮으면 "추출 실패" |
 | `OCR_CONFIDENCE_AGG` | mean | 블록 점수 = 글자 수 가중 평균(`mean`) 또는 최솟값(`min`) |
 | `WORKER_COUNT` | 1 | 동시에 처리할 파일 수 |
@@ -224,7 +224,7 @@ npm run dev
 | 디지털 PDF 2쪽 | 6 | 3.5초 |
 | HWPX | 5 | 0.2초 |
 
-→ 스캔본은 **페이지당 약 5초** 라서 30초 제한이면 대략 **5~6쪽**까지입니다. 더 긴 스캔본은 `PROCESS_TIMEOUT_SEC` 를 늘리세요.
+→ 스캔본은 **페이지당 약 5초** 라서 120초 제한이면 대략 **20쪽**까지입니다 (MAX_PAGES=20 과 맞춤). 더 긴 스캔본은 `PROCESS_TIMEOUT_SEC` 를 늘리세요.
 
 ---
 
