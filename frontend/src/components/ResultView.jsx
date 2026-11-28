@@ -13,10 +13,35 @@ import AssistPanel from './AssistPanel'
 import BlockItem from './BlockItem'
 import PageViewer from './PageViewer'
 
+/**
+ * 결과 옵션(페이지 구분선, 블록 ID 주석)을 브라우저(localStorage)에 기억한다.
+ * "다른 파일 올리기" 를 누르면 이 화면이 사라졌다 다시 만들어져서, 기억하지 않으면 체크가 기본값으로 돌아갔다.
+ * 개인 창 등에서 저장이 막혀도 화면은 기본값으로 정상 동작한다.
+ */
+function useStoredOption(key, initial) {
+  const [value, setValue] = useState(() => {
+    try {
+      const saved = localStorage.getItem(key)
+      return saved === null ? initial : saved === 'true'
+    } catch {
+      return initial
+    }
+  })
+  const update = (v) => {
+    setValue(v)
+    try {
+      localStorage.setItem(key, String(v))
+    } catch {
+      // 저장이 막힌 환경: 이번 화면에서만 유지
+    }
+  }
+  return [value, update]
+}
+
 export default function ResultView({ docId, data, fileName, onRetry, onEdit, onReset, onReload }) {
   const [selected, setSelected] = useState({ id: null, from: null })
-  const [pageSeparator, setPageSeparator] = useState(true)
-  const [debug, setDebug] = useState(false)
+  const [pageSeparator, setPageSeparator] = useStoredOption('ocr.result.pageSeparator', true)
+  const [debug, setDebug] = useStoredOption('ocr.result.debug', false)
   const [notice, setNotice] = useState('')
   const boxRefs = useRef({}) // block_id → 왼쪽 SVG 요소
   const itemRefs = useRef({}) // block_id → 오른쪽 블록 요소
