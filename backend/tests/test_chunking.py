@@ -66,17 +66,44 @@ def test_title_attached_to_next_block():
     assert chunks[1]["block_ids"] == ["p1-b002", "p1-b003"]
 
 
-def test_table_is_own_chunk_without_overlap():
-    table = {"n_rows": 2, "n_cols": 2, "cells": [
-        {"row": 0, "col": 0, "text": "항목", "status": "done"}, {"row": 0, "col": 1, "text": "값", "status": "done"},
-        {"row": 1, "col": 0, "text": "사과", "status": "done"}, {"row": 1, "col": 1, "text": "100", "status": "done"},
+def _table(rows):
+    return {"n_rows": len(rows), "n_cols": len(rows[0]), "cells": [
+        {"row": r, "col": c, "text": v, "status": "done"} for r, row in enumerate(rows) for c, v in enumerate(row)
     ]}
+
+
+def test_small_table_kept_with_heading():
+    """
+    실제 사례(이력서 HWP): 소제목 문단 "2. 학력사항" 다음에 학력 표가 온다. HWP 에는 제목 블록 구분이 없어 소제목이 일반 문단이다.
+    표를 따로 떼면 표 청크에 "학력" 이라는 말이 없어 검색이 안 된다 → 작은 표는 앞뒤 본문과 같은 청크에 담는다.
+    """
     structure = {"blocks": [_block(1), _block(2, "table"), _block(3)]}
-    results = {"p1-b001": _done("표 앞 문단."), "p1-b002": {"status": "done", "table": table}, "p1-b003": _done("표 뒤 문단.")}
+    results = {"p1-b001": _done("2. 학력사항"), "p1-b002": {"status": "done", "table": _table([["학교명", "졸업"], ["백석대", "2025"]])},
+               "p1-b003": _done("3. 경력사항")}
     chunks = build_chunks(build_units(structure, results, True), 1000, 150)
-    assert [c["kind"] for c in chunks] == ["text", "table", "text"]
-    assert chunks[1]["text"] == "항목\t값\n사과\t100" and chunks[1]["overlap_chars"] == 0
-    assert chunks[2]["overlap_chars"] == 0  # 표 다음 본문은 표 글자를 겹쳐 넣지 않는다
+    assert len(chunks) == 1 and chunks[0]["kind"] == "mixed"
+    assert chunks[0]["text"] == "2. 학력사항\n\n학교명\t졸업\n백석대\t2025\n\n3. 경력사항"
+
+
+def test_table_never_cut_between_chunks():
+    """표는 청크 경계에서 반으로 잘리지 않는다. 앞 청크에 자리가 없으면 표 전체가 다음 청크로 간다."""
+    rows = [["항목", "값"]] + [[f"행{i}", "값" * 10] for i in range(10)]
+    table_text = "\n".join("\t".join(r) for r in rows)
+    structure = {"blocks": [_block(1), _block(2, "table")]}
+    results = {"p1-b001": _done("앞 문단 " * 60), "p1-b002": {"status": "done", "table": _table(rows)}}  # 299자 + 표 155자 > 400
+    chunks = build_chunks(build_units(structure, results, True), 400, 50)
+    assert len(chunks) == 2
+    assert table_text in chunks[1]["text"] and "p1-b002" not in chunks[0]["block_ids"]
+    assert all(c["char_count"] <= 400 for c in chunks)
+
+
+def test_big_table_split_by_rows_without_overlap():
+    rows = [["번호", "내용"]] + [[str(i), "가나다라마바사" * 3] for i in range(40)]
+    structure = {"blocks": [_block(1, "table")]}
+    chunks = build_chunks(build_units(structure, {"p1-b001": {"status": "done", "table": _table(rows)}}, True), 300, 50)
+    assert len(chunks) > 1 and {c["kind"] for c in chunks} == {"table"}
+    assert all(c["char_count"] <= 300 and c["overlap_chars"] == 0 for c in chunks)
+    assert all(not c["text"].startswith("\t") for c in chunks)  # 행 단위로 잘린다 (행 중간에서 안 잘림)
 
 
 def test_single_column_table_treated_as_text():

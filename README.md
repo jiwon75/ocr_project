@@ -196,7 +196,7 @@ copy .env.example .env
 나누는 규칙
 1. 블록을 order 순서로 담다가 크기를 넘으면 새 청크 (블록·문장 중간에서 끊지 않음). 긴 블록만 문장 → 글자 순으로 자름
 2. 제목은 다음 블록과 붙임 (제목만 있는 청크를 만들지 않음)
-3. 표는 따로 청크(`kind: "table"`), 오버랩 없음. 단 **열이 1개인 표는 본문으로 취급** (HWP 는 본문을 칸 하나짜리 표에 넣는 경우가 많음)
+3. 표는 **중간에서 자르지 않고 통째로** 앞뒤 본문과 같은 청크에 담음 (소제목 "2. 학력사항"과 학력 표가 같이 있어야 검색됨). 청크 하나보다 큰 표만 따로 행 단위로 나눔. 청크 `kind` 는 `text`·`table`·`mixed`(본문+표). **열이 1개인 표는 본문으로 취급** (HWP 는 본문을 칸 하나짜리 표에 넣는 경우가 많음)
 4. 그림만 있는 블록은 뺌. `[추출 실패: ...]` 표시와 사용자 수정은 .txt 결과와 똑같이 들어감
 5. 청크마다 `page_start`·`page_end`·`block_ids` → 원문 위치를 찾아갈 수 있음
 
@@ -300,7 +300,7 @@ python -m pytest -m "not models"    # 실제 모델 없이 빠르게 (약 1분)
 | `test_stage3_merge.py` | order 순서, txt/md, 구분선, 디버그 주석, DB 저장, (실제 모델) 30초 안에 끝나는지 |
 | `test_rules.py` | 규칙 1~4 (retry 후 번호 불변, 낮은 confidence → 추출 실패, bbox null, .env/.gitignore) |
 | `test_runtime.py` | health not_ready→ready, 모델 한 번만 로딩, **시간 초과 시 실제 중단 + 다음 파일 정상**, 워커 비정상 종료, 손상 파일, 로그 형식·traceback |
-| `test_chunking.py` | 청크 크기·오버랩, 순서·누락 없음, 제목 붙이기, 표 분리, 열 1개 표 = 본문, 페이지 범위, 실패 표시 유지, 잘못된 설정 거절, chunks.json·DB·API, 수정 후 다시 만들기 |
+| `test_chunking.py` | 청크 크기·오버랩, 순서·누락 없음, 제목 붙이기, 작은 표는 소제목과 함께·표는 안 잘림·큰 표만 행 단위 분리, 열 1개 표 = 본문, 페이지 범위, 실패 표시 유지, 잘못된 설정 거절, chunks.json·DB·API, 수정 후 다시 만들기 |
 | `test_api_db.py` | 5MB 초과 413, 2개 업로드 거절, MIME 검사, uploaded_files/extracted_texts 행, 실패 파일은 결과 없음, retry 시 같은 행 갱신, FOREIGN KEY, WAL |
 
 - 시간 초과 테스트는 테스트 시간을 줄이려고 `PROCESS_TIMEOUT_SEC=3` 으로 바꾸고 "120초 걸리는 가짜 파일"을 넣습니다. 30이라는 값도 설정이라 같은 코드가 동작합니다.

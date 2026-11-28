@@ -5,7 +5,8 @@
   규칙
   1. 블록을 order 순서대로 담다가 CHUNK_SIZE_CHARS 를 넘으면 새 청크를 시작한다 (블록·문장 중간에서 끊지 않는다)
   2. 제목 블록은 바로 다음 블록과 붙인다 (제목만 따로 있는 청크는 검색에 쓸모가 없다)
-  3. 표는 따로 청크로 만든다 (표가 본문과 섞이거나 중간에 잘리면 의미가 흐려진다). 너무 긴 표만 줄 단위로 나눈다
+  3. 표는 중간에서 자르지 않고 통째로 앞뒤 본문과 함께 담는다 (소제목 "2. 학력사항" + 학력 표가 한 청크에 들어가야
+     검색이 된다). 청크 하나보다 큰 표만 따로 떼어 행(줄) 단위로 나눈다
   4. 블록 하나가 너무 길면 문장(없으면 줄·글자) 단위로 나눈다
   5. 본문 청크는 앞 청크의 끝부분(CHUNK_OVERLAP_CHARS 글자 정도)을 앞에 겹쳐 넣어, 경계에서 문맥이 끊기지 않게 한다
   6. 각 청크에는 페이지 범위와 들어 있는 block_id 를 붙인다 → 원문 위치를 찾아갈 수 있다
@@ -173,7 +174,7 @@ def overlap_tail(text: str, overlap_chars: int) -> str:
 def build_chunks(units: list[Unit], size: int, overlap: int) -> list[dict]:
     """
     덩어리들을 size 글자 이하의 청크로 묶는다.
-    돌려주는 값: [{"chunk_index"(1부터), "kind", "text", "char_count", "overlap_chars", "page_start", "page_end", "block_ids"}]
+    돌려주는 값: [{"chunk_index"(1부터), "kind"(text|table|mixed), "text", "char_count", "overlap_chars", "page_start", "page_end", "block_ids"}]
     overlap_chars 는 text 맨 앞에서 앞 청크와 겹치는 글자 수 (text[:overlap_chars] 가 앞 청크에서 가져온 부분).
     """
     if size <= 0:
@@ -195,9 +196,10 @@ def build_chunks(units: list[Unit], size: int, overlap: int) -> list[dict]:
             return
         body = sep.join(u.text for u in current)
         text = head + sep + body if head else body
+        kinds = {u.kind for u in current}
         chunks.append({
             "chunk_index": len(chunks) + 1,
-            "kind": "text",
+            "kind": kinds.pop() if len(kinds) == 1 else "mixed",  # text | table | mixed(본문 + 표)
             "text": text,
             "char_count": len(text),
             "overlap_chars": len(head),
@@ -211,8 +213,8 @@ def build_chunks(units: list[Unit], size: int, overlap: int) -> list[dict]:
     # 오버랩을 붙여도 size 를 넘지 않도록 본문 조각은 (size - overlap - 구분자) 이하로 나눈다
     text_max = max(1, size - overlap - len(sep))
     for unit in units:
-        if unit.kind == "table":
-            # 표는 앞 본문과 섞지 않고, 오버랩도 넣지 않는다. 표 다음 본문은 오버랩 없이 새로 시작한다
+        if unit.kind == "table" and len(unit.text) > size:
+            # 청크 하나에 다 안 들어가는 큰 표만 따로 떼어 행(줄) 단위로 나눈다. 표 조각끼리는 오버랩을 넣지 않는다
             flush()
             head = ""
             for part in split_long(unit, size):
@@ -227,10 +229,14 @@ def build_chunks(units: list[Unit], size: int, overlap: int) -> list[dict]:
                     "block_ids": list(part.block_ids),
                 })
             continue
-        for piece in split_long(unit, text_max):
+        # 표는 자르지 않고 통째로, 본문은 문장 단위로 앞뒤 내용과 함께 담는다.
+        # (표만 따로 떼면 "1. 기본정보" 같은 소제목과 표가 갈라져, 표 청크만 보고는 무슨 표인지 알 수 없었다)
+        for piece in ([unit] if unit.kind == "table" else split_long(unit, text_max)):
             extra = len(head) + len(sep) if head else 0
             if current and extra + body_len() + len(sep) + len(piece.text) > size:
                 flush()
+            if not current and head and len(head) + len(sep) + len(piece.text) > size:
+                head = ""  # 큰 표가 새 청크를 시작할 때 오버랩까지 넣으면 넘치면 오버랩을 뺀다
             current.append(piece)
     flush()
     return chunks
