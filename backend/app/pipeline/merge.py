@@ -171,6 +171,19 @@ def is_skipped(block: dict, skip_page_furniture: bool) -> bool:
     return skip_page_furniture and block["type"] in PAGE_FURNITURE_TYPES and block.get("source") != "hwp"
 
 
+def is_dropped(block: dict, result: dict | None, skip_page_furniture: bool) -> bool:
+    """
+    최종 결과(.txt/.md, 청크)에 넣지 않을 블록인지.
+    - 머리말·꼬리말 블록 (is_skipped)
+    - 레이아웃 블록 밖에서 다시 찾은 글자가 신뢰도 미달인 경우 (화면 버튼·아이콘 같은 잡음이 대부분).
+      레이아웃 모델이 잡은 블록이 아니라 우리가 덧붙인 것이라 [규칙 2]의 "블록을 빼먹지 않는다" 대상이 아니다. 화면에는 보인다
+    """
+    if is_skipped(block, skip_page_furniture):
+        return True
+    return (block.get("label") == "uncovered_text" and bool(result) and result.get("status") == "failed"
+            and result.get("edited_text") is None)
+
+
 def merge_document(structure: dict, results: dict[str, dict], fmt: str = "txt", page_separator: bool = True, debug: bool = False,
                    skip_page_furniture: bool = False) -> str:
     """
@@ -181,12 +194,8 @@ def merge_document(structure: dict, results: dict[str, dict], fmt: str = "txt", 
     parts: list[str] = []
     last_page = None
     for block in sorted(structure["blocks"], key=lambda b: b["order"]):  # [규칙 1] order 순서
-        if is_skipped(block, skip_page_furniture):
-            continue
         result = results.get(block["block_id"])
-        if block.get("label") == "uncovered_text" and result and result.get("status") == "failed" and result.get("edited_text") is None:
-            # 레이아웃 블록 밖에서 다시 찾은 글자가 신뢰도 미달이면 결과에 넣지 않는다 (화면 버튼·아이콘 같은 잡음이 대부분).
-            # 레이아웃 모델이 잡은 블록이 아니라 우리가 덧붙인 것이라 [규칙 2]의 "블록을 빼먹지 않는다" 대상이 아니다. 화면에는 보인다
+        if is_dropped(block, result, skip_page_furniture):
             continue
         if page_separator and last_page is not None and block["page"] != last_page:
             parts.append(f"--- page {block['page']} ---")

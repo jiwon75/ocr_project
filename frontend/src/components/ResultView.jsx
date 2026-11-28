@@ -71,7 +71,11 @@ export default function ResultView({ docId, data, fileName, onRetry, onEdit, onR
   const download = async (format) => {
     let blob
     try {
-      if (format === 'pdf' || format === 'pptx') {
+      if (format === 'chunks') {
+        // 청크는 서버(DB)에 저장된 목록을 그대로 JSON 파일로 받는다
+        const data = await api.chunks(docId)
+        blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' })
+      } else if (format === 'pdf' || format === 'pptx') {
         flash(`${format === 'pdf' ? 'PDF' : 'PPT'} 파일을 만드는 중...`)
         blob = await api.resultFile(docId, format, { debug })
       } else {
@@ -84,7 +88,7 @@ export default function ResultView({ docId, data, fileName, onRetry, onEdit, onR
     }
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = fileName.replace(/\.[^.]+$/, '') + '.' + format
+    a.download = fileName.replace(/\.[^.]+$/, '') + (format === 'chunks' ? '.chunks.json' : '.' + format)
     a.click()
     URL.revokeObjectURL(a.href)
   }
@@ -113,6 +117,8 @@ export default function ResultView({ docId, data, fileName, onRetry, onEdit, onR
         {/* 글자를 선택·수정할 수 있는 PDF, 페이지마다 슬라이드 하나인 PowerPoint */}
         <button onClick={() => download('pdf')} title="글자를 선택·복사·수정할 수 있는 PDF">PDF 다운로드</button>
         <button onClick={() => download('pptx')} title="페이지마다 슬라이드 하나, 원본 위치에 글상자·표·그림">PPT 다운로드</button>
+        {/* 검색·RAG 용으로 나눈 청크(글자 수·페이지·블록 번호 포함). 크기·겹침은 backend .env 의 CHUNK_SIZE_CHARS / CHUNK_OVERLAP_CHARS */}
+        <button onClick={() => download('chunks')} title="추출 텍스트를 검색·RAG 용 조각(청크)으로 나눈 JSON">청크 JSON 다운로드</button>
         {notice && <span className="notice">{notice}</span>}
       </div>
 

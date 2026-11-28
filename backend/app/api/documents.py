@@ -12,6 +12,7 @@
   PATCH /api/documents/{doc_id}/blocks/{block_id}   사용자 수정(edited_text)
   GET   /api/documents/{doc_id}/pages/{page}/image  원본 페이지 이미지
   GET   /api/documents/{doc_id}/result?format=txt|md|pdf|pptx&page_separator=&debug=
+  GET   /api/documents/{doc_id}/chunks              검색·RAG 용 청크 목록 (DB text_chunks)
 
 [왜 이렇게 나눴는지]
 API 함수는 "요청이 올바른지 검사하고, pipeline 의 함수를 부르고, 응답을 만드는 것"만 한다.
@@ -292,6 +293,31 @@ def get_result(request: Request, doc_id: str, format: str = "txt", page_separato
     text = merge_document(structure, load_results(storage, structure), format, sep, debug, settings.MERGE_SKIP_PAGE_FURNITURE)
     media = "text/markdown; charset=utf-8" if format == "md" else "text/plain; charset=utf-8"
     return PlainTextResponse(text, media_type=media)
+
+
+@router.get("/{doc_id}/chunks")
+def get_chunks(request: Request, doc_id: str):
+    """
+    추출 텍스트를 나눈 청크 목록 (app/pipeline/chunking.py). DB text_chunks 에 저장된 것을 그대로 돌려준다.
+    블록을 고치거나 retry 하면 3단계와 함께 다시 만들어진다.
+    """
+    settings = request.app.state.settings
+    storage = _storage(request, doc_id)
+    if (read_status(storage) or {}).get("state") != "done":
+        raise HTTPException(409, "아직 처리가 끝나지 않았거나 실패한 문서입니다.")
+    row = _file_row(request, doc_id)
+    chunks = [
+        {k: c[k] for k in ("chunk_index", "kind", "text", "char_count", "overlap_chars", "page_start", "page_end", "block_ids")}
+        for c in db.get_text_chunks(settings.DB_PATH, row["id"])
+    ]
+    return {
+        "doc_id": doc_id,
+        "file_name": row["file_name"],
+        "chunk_size": settings.CHUNK_SIZE_CHARS,
+        "chunk_overlap": settings.CHUNK_OVERLAP_CHARS,
+        "count": len(chunks),
+        "chunks": chunks,
+    }
 
 
 # ---------------------------------------------------------------------

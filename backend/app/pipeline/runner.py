@@ -1,6 +1,6 @@
 """
 [이 파일이 하는 일]
-문서 하나를 전처리 → 1단계 → 2단계 → 3단계 → DB 저장 순서로 실행하고,
+문서 하나를 전처리 → 1단계 → 2단계 → 3단계(합치기 + 청킹) → DB 저장 순서로 실행하고,
 단계마다 로그와 진행 상태(status.json)를 남긴다. 실패하면 어느 단계에서 왜 실패했는지 기록한다.
 블록 retry(다시 처리)와 사용자 수정 반영도 여기 있다.
 
@@ -16,6 +16,7 @@ from app import db
 from app.config import Settings
 from app.logger import log_ctx, logger, stage_log
 from app.pipeline.errors import PipelineError, user_message
+from app.pipeline.chunking import write_chunks
 from app.pipeline.layout import run_layout
 from app.pipeline.merge import merge_outputs, save_to_db
 from app.pipeline.preprocess import preprocess
@@ -65,10 +66,13 @@ def run_document(job: dict, engines, settings: Settings) -> None:
         update_status(storage, state="merging", stage="merge")
         with stage_log("merge", doc_id, name):
             text = merge_outputs(storage, settings)
+            chunks = write_chunks(storage, settings)
+        logger.info(f"청크 {len(chunks)}개 생성", extra=log_ctx(doc_id, name, "merge"))
 
         stage = "db"
         with stage_log("db", doc_id, name):
             save_to_db(settings, job["file_id"], name, text)
+            db.save_text_chunks(settings.DB_PATH, job["file_id"], chunks)
 
         update_status(storage, state="done", stage="done", failed_blocks=failed)
     except PipelineError as e:
@@ -88,6 +92,7 @@ def _fail_document(settings, storage: DocStorage, job: dict, stage: str, reason:
     """
     mark_failed(storage, stage, reason, message)
     db.delete_extracted_texts(settings.DB_PATH, job["file_id"])
+    db.delete_text_chunks(settings.DB_PATH, job["file_id"])
     logger.error(f"파일 처리 실패: {reason} — {message}", extra=log_ctx(job["doc_id"], job["file_name"], stage))
 
 
@@ -188,8 +193,10 @@ def apply_corrections(settings: Settings, job: dict, sids: list[int]) -> dict:
 
 
 def remerge(settings: Settings, storage: DocStorage, job: dict) -> None:
-    """3단계를 다시 실행하고, 같은 file_id 의 DB 행을 갱신한다 (retry·수정 후)."""
+    """3단계를 다시 실행하고, 같은 file_id 의 DB 행(결과 텍스트 + 청크)을 갱신한다 (retry·수정 후)."""
     with stage_log("merge", job["doc_id"], job["file_name"]):
         text = merge_outputs(storage, settings)
+        chunks = write_chunks(storage, settings)
     with stage_log("db", job["doc_id"], job["file_name"]):
         save_to_db(settings, job["file_id"], job["file_name"], text)
+        db.save_text_chunks(settings.DB_PATH, job["file_id"], chunks)

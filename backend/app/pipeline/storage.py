@@ -11,6 +11,7 @@
     blocks/p1-b001.png      2단계: 블록 crop 이미지
     results/p1-b001.json    2단계: 블록 처리 결과
     output/result.txt|md    3단계: 합친 결과
+    output/chunks.json      3단계: 합친 결과를 검색·RAG 용으로 나눈 청크 (DB text_chunks 에도 저장)
     assist/summary.json     LLM 도우미: 요약 / assist/corrections.json 교정 제안 (app/assist)
 
 [왜 이렇게 나눴는지]
@@ -136,6 +137,11 @@ class DocStorage:
         if fmt not in ("txt", "md"):
             raise ValueError(fmt)
         return self.output_dir / f"result.{fmt}"
+
+    @property
+    def chunks_json(self) -> Path:
+        """3단계: 검색·RAG 용 청크 목록 (app/pipeline/chunking.py). DB text_chunks 와 같은 내용."""
+        return self.output_dir / "chunks.json"
 
     def assist_json(self, kind: str) -> Path:
         """LLM 도우미 결과 파일. kind 는 summary | corrections 만 (경로 조작 방지)."""

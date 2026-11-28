@@ -36,6 +36,7 @@
                 │           table: 셀 구조+셀별 OCR, image: 저장+속 글자 OCR)                 │
                 │           → blocks/{block_id}.png, results/{block_id}.json                 │
                 │ 3단계     order 순서로 합치기 → output/result.txt|md → extracted_texts      │
+                │           + 청킹 → output/chunks.json → text_chunks                       │
                 └──────────────────────────────────────────────────────────────────────────┘
        API 서버(메인 프로세스)가 시간을 재다가 PROCESS_TIMEOUT_SEC 를 넘으면 워커를 강제 종료(kill)
 ```
@@ -80,10 +81,14 @@ uploaded_files (id PK, doc_id UNIQUE, file_name, file_path, file_type, created_a
       │  FOREIGN KEY (file_id → uploaded_files.id)
       │ 0..1
 extracted_texts (id PK, file_id, file_name, extracted_text, created_at)
+
+uploaded_files 1 ── 0..N text_chunks (id PK, file_id, chunk_index, kind, text, char_count,
+                                      overlap_chars, page_start, page_end, block_ids, created_at)
 ```
 
 - 업로드 검사 통과 → `uploaded_files` 1행. 3단계 완료 → `extracted_texts` 1행 (retry/수정 시 **같은 행 갱신**).
 - 파일 전체 실패(시간 초과·손상 등) → `extracted_texts` 에 저장하지 않음 (실패 사유는 status API·로그).
+- 3단계 완료 → `text_chunks` 에 청크 N행 (retry/수정 시 그 파일의 청크를 **통째로 다시 만듦**). 실패 파일은 청크도 없음.
 - 같은 이름의 파일이 여러 번 올라와도 `file_id` 로 연결되므로 섞이지 않습니다.
 - 프로세스마다 연결을 따로 열고, WAL 모드를 켭니다. SQL 값은 모두 `?` 자리표시자로 넣습니다.
 
@@ -114,6 +119,7 @@ backend/
       processors/         2단계: common.py, text.py, table.py, image.py
       process.py          2단계 실행 (블록 하나 / 전체)
       merge.py            3단계: 합치기 (.txt/.md) + DB 저장
+      chunking.py         3단계: 합친 결과를 검색·RAG 용 청크로 나누기 (→ chunks.json, text_chunks)
       runner.py           단계 순서·로그·실패 기록, retry, 수정 반영
       worker.py           워커 프로세스, 시간 제한, 강제 종료/재시작
       status.py storage.py errors.py
@@ -177,6 +183,24 @@ copy .env.example .env
 
 - **PDF**: 글자가 그림이 아니라 진짜 글자로 들어가 선택·복사·검색·수정할 수 있습니다. 원본 페이지마다 새 A4 페이지에서 시작하고 제목·본문·표·그림을 위에서 아래로 다시 배치합니다. 한글은 PyMuPDF 에 들어 있는 글꼴을 쓰고, 쓴 글자만 넣어 파일을 줄입니다.
 - **PPT(.pptx)**: 원본 페이지 하나가 슬라이드 하나이고, 블록을 원본 위치에 글상자·PowerPoint 표·그림으로 놓아 바로 고칠 수 있습니다. 글자 크기는 원본 줄 높이로 어림하므로 PowerPoint 에서 조금 다듬어야 할 수 있습니다. 위치 정보가 없는 HWP 는 위에서부터 차례로 쌓습니다. 차트는 그림만 넣습니다 (값 표는 PDF·txt 에 있음).
+
+### 청킹 (검색·RAG 용 텍스트 조각)
+
+3단계에서 추출 텍스트를 **청크**(조각)로 나눠 `storage/{doc_id}/output/chunks.json` 과 DB `text_chunks` 에 저장합니다 (`backend/app/pipeline/chunking.py`). 결과 화면의 **청크 JSON 다운로드** 버튼이나 `GET /api/documents/{doc_id}/chunks` 로 받을 수 있습니다.
+
+| 설정 (`backend/.env`) | 기본값 | 설명 |
+|---|---|---|
+| `CHUNK_SIZE_CHARS` | 1000 | 청크 하나의 최대 글자 수 |
+| `CHUNK_OVERLAP_CHARS` | 150 | 앞 청크 끝부분을 다음 청크 앞에 겹쳐 넣는 글자 수 (0 = 안 겹침, 크기보다 작아야 함) |
+
+나누는 규칙
+1. 블록을 order 순서로 담다가 크기를 넘으면 새 청크 (블록·문장 중간에서 끊지 않음). 긴 블록만 문장 → 글자 순으로 자름
+2. 제목은 다음 블록과 붙임 (제목만 있는 청크를 만들지 않음)
+3. 표는 따로 청크(`kind: "table"`), 오버랩 없음. 단 **열이 1개인 표는 본문으로 취급** (HWP 는 본문을 칸 하나짜리 표에 넣는 경우가 많음)
+4. 그림만 있는 블록은 뺌. `[추출 실패: ...]` 표시와 사용자 수정은 .txt 결과와 똑같이 들어감
+5. 청크마다 `page_start`·`page_end`·`block_ids` → 원문 위치를 찾아갈 수 있음
+
+`app/assist/core.py` 의 `chunk_texts` 는 LLM 에 잠깐 나눠 보내는 용도이고, 이 청킹은 결과로 **저장**하는 것입니다.
 
 ### AI 도우미 (Ollama, 선택)
 
@@ -249,6 +273,7 @@ npm run dev
 | PATCH | `/api/documents/{doc_id}/blocks/{block_id}` | `{"edited_text": "..."}` 사용자 수정 (null = 취소) |
 | GET | `/api/documents/{doc_id}/pages/{page}/image` | 원본 페이지 이미지 |
 | GET | `/api/documents/{doc_id}/result?format=txt\|md\|pdf\|pptx&page_separator=true&debug=false` | 최종 결과. pdf·pptx 는 파일로 (아래 "PDF·PPT 내보내기") |
+| GET | `/api/documents/{doc_id}/chunks` | 검색·RAG 용 청크 목록 (`text_chunks`, 위 "청킹") |
 | GET | `/api/assist/status` | Ollama 연결·모델 설치 여부 |
 | GET | `/api/documents/{doc_id}/assist` | 요약·교정 제안 결과와 진행 상태 |
 | POST | `/api/documents/{doc_id}/assist/summary` · `/assist/corrections` | 요약 / 교정 제안 시작 (202, 백그라운드) |
@@ -275,6 +300,7 @@ python -m pytest -m "not models"    # 실제 모델 없이 빠르게 (약 1분)
 | `test_stage3_merge.py` | order 순서, txt/md, 구분선, 디버그 주석, DB 저장, (실제 모델) 30초 안에 끝나는지 |
 | `test_rules.py` | 규칙 1~4 (retry 후 번호 불변, 낮은 confidence → 추출 실패, bbox null, .env/.gitignore) |
 | `test_runtime.py` | health not_ready→ready, 모델 한 번만 로딩, **시간 초과 시 실제 중단 + 다음 파일 정상**, 워커 비정상 종료, 손상 파일, 로그 형식·traceback |
+| `test_chunking.py` | 청크 크기·오버랩, 순서·누락 없음, 제목 붙이기, 표 분리, 열 1개 표 = 본문, 페이지 범위, 실패 표시 유지, 잘못된 설정 거절, chunks.json·DB·API, 수정 후 다시 만들기 |
 | `test_api_db.py` | 5MB 초과 413, 2개 업로드 거절, MIME 검사, uploaded_files/extracted_texts 행, 실패 파일은 결과 없음, retry 시 같은 행 갱신, FOREIGN KEY, WAL |
 
 - 시간 초과 테스트는 테스트 시간을 줄이려고 `PROCESS_TIMEOUT_SEC=3` 으로 바꾸고 "120초 걸리는 가짜 파일"을 넣습니다. 30이라는 값도 설정이라 같은 코드가 동작합니다.

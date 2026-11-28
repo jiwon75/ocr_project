@@ -13,6 +13,7 @@ DB 를 다루는 코드는 이 파일에만 두고, 다른 코드는 insert_uplo
 - WAL(Write-Ahead Logging) 모드: 쓰는 내용을 먼저 별도 기록 파일에 적어 두는 방식.
   한 프로세스가 쓰는 동안에도 다른 프로세스가 읽을 수 있어서, API 서버와 워커가 동시에 DB 를 써도 덜 막힌다.
 """
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -39,6 +40,26 @@ CREATE TABLE IF NOT EXISTS extracted_texts (
 
 -- file_id 로 자주 찾으므로 색인(index)을 만들어 둔다. 책의 "찾아보기"처럼 검색을 빠르게 해 준다
 CREATE INDEX IF NOT EXISTS idx_extracted_texts_file_id ON extracted_texts(file_id);
+
+-- 추출 텍스트를 검색·RAG 용으로 나눈 청크 (app/pipeline/chunking.py). 파일 하나에 여러 줄, chunk_index 는 1부터
+-- block_ids 는 이 청크에 들어 있는 블록 번호 목록(JSON 배열 문자열). 원문 위치를 찾아갈 때 쓴다
+CREATE TABLE IF NOT EXISTS text_chunks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id         INTEGER NOT NULL,
+    chunk_index     INTEGER NOT NULL,
+    kind            TEXT NOT NULL,
+    text            TEXT NOT NULL,
+    char_count      INTEGER NOT NULL,
+    overlap_chars   INTEGER NOT NULL,
+    page_start      INTEGER NOT NULL,
+    page_end        INTEGER NOT NULL,
+    block_ids       TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (file_id) REFERENCES uploaded_files(id),
+    UNIQUE (file_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_text_chunks_file_id ON text_chunks(file_id);
 """
 
 
@@ -132,6 +153,35 @@ def delete_extracted_texts(db_path: Path, file_id: int) -> None:
     """
     with connect(db_path) as conn:
         conn.execute("DELETE FROM extracted_texts WHERE file_id = ?", (file_id,))
+
+
+def save_text_chunks(db_path: Path, file_id: int, chunks: list[dict]) -> None:
+    """
+    파일 하나의 청크를 통째로 바꿔 저장한다 (기존 청크 삭제 → 새로 넣기).
+    retry·수정 후 다시 합치면 청크 개수가 달라질 수 있어서, 갱신 대신 한 번에(같은 트랜잭션에서) 갈아 끼운다.
+    """
+    now = _now()
+    with connect(db_path) as conn:
+        conn.execute("DELETE FROM text_chunks WHERE file_id = ?", (file_id,))
+        conn.executemany(
+            "INSERT INTO text_chunks (file_id, chunk_index, kind, text, char_count, overlap_chars, page_start, page_end, block_ids, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(file_id, c["chunk_index"], c["kind"], c["text"], c["char_count"], c["overlap_chars"], c["page_start"], c["page_end"],
+              json.dumps(c["block_ids"]), now) for c in chunks],
+        )
+
+
+def delete_text_chunks(db_path: Path, file_id: int) -> None:
+    """파일 전체가 실패했을 때 청크도 지운다 (extracted_texts 와 같은 이유)."""
+    with connect(db_path) as conn:
+        conn.execute("DELETE FROM text_chunks WHERE file_id = ?", (file_id,))
+
+
+def get_text_chunks(db_path: Path, file_id: int) -> list[dict]:
+    """file_id 의 청크 목록 (chunk_index 순). block_ids 는 다시 리스트로 바꿔 돌려준다."""
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT * FROM text_chunks WHERE file_id = ? ORDER BY chunk_index", (file_id,)).fetchall()
+    return [{**dict(r), "block_ids": json.loads(r["block_ids"])} for r in rows]
 
 
 def get_extracted_texts(db_path: Path, file_id: int) -> list[dict]:

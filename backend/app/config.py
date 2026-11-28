@@ -15,7 +15,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend 폴더의 절대 경로.
@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     # 레이아웃 모델이 머리말·꼬리말·쪽번호로 잡은 블록(이미지·PDF)을 .txt/.md 결과에서 뺄지. 화면에는 그대로 보인다
     MERGE_SKIP_PAGE_FURNITURE: bool = True
 
+    # ---- 청킹 (추출 텍스트를 검색·RAG 용 조각으로 나눠 저장) — app/pipeline/chunking.py ----
+    # 청크 하나의 최대 글자 수. 너무 작으면 문맥이 끊기고, 너무 크면 한 청크에 여러 주제가 섞여 검색이 부정확해진다
+    CHUNK_SIZE_CHARS: int = 1000
+    # 앞 청크 끝부분을 다음 청크 앞에 겹쳐 넣는 글자 수 (보통 크기의 10~20%). 0 이면 겹치지 않는다. CHUNK_SIZE_CHARS 보다 작아야 한다
+    CHUNK_OVERLAP_CHARS: int = 150
+
     # ---- LLM 도우미 (Ollama: 내 PC 에서 돌리는 LLM 서버) — 요약·오타 교정 제안 ----
     # 꺼 두거나 Ollama 가 안 켜져 있어도 OCR 은 그대로 동작한다. 화면의 요약/교정 버튼만 쓸 수 없다고 안내된다
     LLM_ENABLED: bool = True
@@ -114,6 +120,15 @@ class Settings(BaseSettings):
         """상대 경로를 backend 폴더 기준 절대 경로로 바꾼다. 실행 위치에 따라 경로가 달라지는 사고를 막기 위해서다."""
         value = Path(value)
         return value if value.is_absolute() else (BASE_DIR / value).resolve()
+
+    @model_validator(mode="after")
+    def _check_chunk_settings(self):
+        """청크 설정이 말이 되는지 서버 시작 때 확인한다 (잘못되면 문서마다 실패하는 대신 바로 알 수 있게)."""
+        if self.CHUNK_SIZE_CHARS < 1:
+            raise ValueError("CHUNK_SIZE_CHARS 는 1 이상이어야 합니다.")
+        if not 0 <= self.CHUNK_OVERLAP_CHARS < self.CHUNK_SIZE_CHARS:
+            raise ValueError("CHUNK_OVERLAP_CHARS 는 0 이상, CHUNK_SIZE_CHARS 보다 작아야 합니다.")
+        return self
 
     @property
     def max_file_size_bytes(self) -> int:

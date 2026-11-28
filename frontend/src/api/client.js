@@ -62,6 +62,9 @@ export const api = {
     return request(`/documents/${docId}/result?${q}`, { blob: true })
   },
 
+  /** 추출 텍스트를 검색·RAG 용으로 나눈 청크 목록 (backend/app/pipeline/chunking.py, DB text_chunks) */
+  chunks: (docId) => request(`/documents/${docId}/chunks`),
+
   // ---- LLM 도우미 (Ollama) — 선택 기능. 꺼져 있으면 assistStatus 의 message 에 이유가 온다 ----
   assistStatus: () => request('/assist/status'),
   assist: (docId) => request(`/documents/${docId}/assist`),
