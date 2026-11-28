@@ -61,6 +61,8 @@ class FakeEngines:
 
     def detect_text(self, crop: np.ndarray) -> list[list[float]]:
         h, w = crop.shape[:2]
+        if (w, h) == FAKE_PAGE_SIZE:
+            return []  # 페이지 전체 검출(블록 밖 글자 찾기): 가짜 페이지에는 블록 밖 글자가 없다
         g = _gray(crop)
         if g in (200, 205, 210, 215) or 195 <= g <= 220:
             # 표: 4칸 각각의 가운데에 줄 하나씩

@@ -11,6 +11,39 @@ from tests import samples
 from tests.fakes import FakeEngines
 
 
+def test_uncovered_text_becomes_text_block():
+    """레이아웃 모델이 놓친 글자(예: 영상 자막)는 블록 밖 글자 상자를 묶어 text 블록으로 만든다."""
+    from app.pipeline.layout import uncovered_text_blocks
+
+    class _Det:
+        @staticmethod
+        def detect_text(page):
+            return [[10, 10, 90, 40],  # 표 블록 안 → 무시
+                    [100, 300, 200, 340], [215, 302, 330, 338],  # 자막 한 줄이 두 조각으로 검출됨 → 한 블록
+                    [600, 500, 640, 520]]  # 멀리 떨어진 글자 → 별도 블록
+    blocks = [{"type": "table", "bbox": [0, 0, 400, 200]}]
+    found = uncovered_text_blocks(_Det(), None, blocks, "ocr")
+    assert [b["bbox"] for b in found] == [[100, 300, 330, 340], [600, 500, 640, 520]]
+    assert all(b["type"] == "text" and b["label"] == "uncovered_text" for b in found)
+
+
+def test_uncovered_grid_becomes_one_table_block():
+    """레이아웃 모델이 표를 못 잡아도, 블록 밖 글자가 행·열로 가지런하면 낱개 블록이 아니라 표 블록 하나가 된다."""
+    import numpy as np
+    from app.pipeline.layout import uncovered_text_blocks
+
+    grid = [[100 + c * 100, 100 + r * 50, 130 + c * 100, 130 + r * 50] for r in range(4) for c in range(3)]
+    tiny = [[10, 980, 60, 990]]  # 페이지 높이의 1% — 플레이어 재생 시간 같은 작은 글자
+
+    class _Det:
+        @staticmethod
+        def detect_text(page):
+            return grid + tiny + [[300, 700, 600, 760]]  # 큰 자막 한 줄
+
+    found = uncovered_text_blocks(_Det(), np.zeros((1000, 1000, 3), np.uint8), [], "ocr", 0.03)
+    assert [(b["type"], b["bbox"]) for b in found] == [("table", [100, 100, 330, 280]), ("text", [300, 700, 600, 760])]
+
+
 def _b(name, x1, y1, x2, y2):
     return {"name": name, "bbox": [x1, y1, x2, y2]}
 
@@ -127,3 +160,43 @@ def test_real_layout_two_column_reading_order(tmp_path, settings, real_engines):
             if tag in words:
                 labels.append(tag)
     assert labels == ["LEFT-1", "LEFT-2", "LEFT-3", "RIGHT-1", "RIGHT-2", "RIGHT-3"], labels
+
+
+# ---------------- 디지털 PDF: 레이아웃 모델이 놓친 글자 / 잘못 묶은 블록 (볼보 사양 PDF 사례) ----------------
+
+
+def _rows_of(x_starts, y_top, n_rows, h=28, step=52, w=200):
+    return [[x, y_top + i * step, x + w, y_top + i * step + h] for i in range(n_rows) for x in x_starts]
+
+
+def test_uncovered_pdf_lines_become_blocks():
+    from app.pipeline.layout import uncovered_pdf_blocks
+
+    title = {"type": "title", "bbox": [120, 200, 300, 260]}
+    left_list = [[160, 400 + i * 52, 500, 428 + i * 52] for i in range(5)]  # 놓친 목록 5줄 (한 문단)
+    covered = [[130, 210, 280, 250]]  # 제목 안의 줄 → 새 블록이 되면 안 된다
+    found = uncovered_pdf_blocks(covered + left_list, [title])
+    assert [(b["type"], b["label"]) for b in found] == [("text", "uncovered_text")]
+    assert found[0]["bbox"] == [160, 400, 500, 636]
+
+
+def test_uncovered_pdf_spec_grid_becomes_table_but_two_column_list_does_not():
+    from app.pipeline.layout import uncovered_pdf_blocks
+
+    grid = _rows_of([120, 600, 1070], 560, 4, h=25, step=60)  # "이름 / 값" 3열 사양표
+    found = uncovered_pdf_blocks(grid, [])
+    assert [b["type"] for b in found] == ["table"]
+    two_col = _rows_of([160, 870], 400, 6)  # 2단 목록은 표가 아니다
+    assert {b["type"] for b in uncovered_pdf_blocks(two_col, [])} == {"text"}
+
+
+def test_overmerged_text_block_detection():
+    from app.pipeline.layout import _overmerged_text_block
+
+    lines = _rows_of([160, 870], 200, 10)
+    wide = {"type": "text", "bbox": [120, 180, 1400, 760]}  # 두 단을 한 블록으로 묶음
+    left = {"type": "text", "bbox": [120, 180, 400, 760]}
+    assert _overmerged_text_block(wide, lines, [wide])
+    assert not _overmerged_text_block(left, lines, [left])
+    inner = {"type": "title", "bbox": [150, 300, 300, 330]}
+    assert _overmerged_text_block(left, lines, [left, inner])  # 다른 블록을 품고 있다

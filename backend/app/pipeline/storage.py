@@ -11,6 +11,7 @@
     blocks/p1-b001.png      2단계: 블록 crop 이미지
     results/p1-b001.json    2단계: 블록 처리 결과
     output/result.txt|md    3단계: 합친 결과
+    assist/summary.json     LLM 도우미: 요약 / assist/corrections.json 교정 제안 (app/assist)
 
 [왜 이렇게 나눴는지]
 경로를 코드 여기저기서 문자열로 만들면 오타 하나로 엉뚱한 곳에 저장된다. 경로 규칙은 이 클래스에만 둔다.
@@ -135,6 +136,12 @@ class DocStorage:
         if fmt not in ("txt", "md"):
             raise ValueError(fmt)
         return self.output_dir / f"result.{fmt}"
+
+    def assist_json(self, kind: str) -> Path:
+        """LLM 도우미 결과 파일. kind 는 summary | corrections 만 (경로 조작 방지)."""
+        if kind not in ("summary", "corrections"):
+            raise ValueError(kind)
+        return self.root / "assist" / f"{kind}.json"
 
     @staticmethod
     def _check_block_id(block_id: str) -> None:

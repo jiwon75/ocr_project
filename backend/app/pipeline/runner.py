@@ -48,7 +48,8 @@ def run_document(job: dict, engines, settings: Settings) -> None:
         stage = "layout"
         update_status(storage, stage="layout")
         with stage_log("layout", doc_id, name) as _:
-            structure = run_layout(prepared, storage, engines, {"doc_id": doc_id, "file_name": name, "language": job["language"]})
+            structure = run_layout(prepared, storage, engines, {"doc_id": doc_id, "file_name": name, "language": job["language"]},
+                                   settings.LAYOUT_SWEEP_UNCOVERED_TEXT, settings.LAYOUT_SWEEP_MIN_HEIGHT_RATIO)
         total = len(structure["blocks"])
         logger.info(f"블록 {total}개 검출", extra=log_ctx(doc_id, name, "layout"))
 
@@ -161,10 +162,29 @@ def apply_edit(settings: Settings, job: dict, edited_text: str | None) -> dict:
     result = read_json(path)
     result["edited_text"] = edited_text
     result["edited_at"] = now() if edited_text is not None else None
+    if edited_text is None:
+        # "원래대로" 는 표 칸 단위 수정(LLM 교정 제안 수락)도 함께 되돌린다
+        for cell in (result.get("table") or {}).get("cells", []):
+            cell.pop("edited_text", None)
     write_json(path, result)
     with stage_log("edit", job["doc_id"], job["file_name"], detail=job["block_id"]):
         remerge(settings, storage, job)
     return result
+
+
+def apply_corrections(settings: Settings, job: dict, sids: list[int]) -> dict:
+    """
+    사용자가 고른 LLM 교정 제안을 적용하고 다시 합친다. (메인 프로세스, 모델 불필요)
+    [규칙 2] 제안은 edited_text(블록 또는 표 칸)에만 저장된다. [규칙 1] 번호는 건드리지 않는다.
+    """
+    from app.assist.jobs import apply_corrections as apply_to_storage  # assist 는 선택 기능이라 쓸 때만 불러온다
+
+    storage = DocStorage(settings.STORAGE_DIR, job["doc_id"])
+    out = apply_to_storage(storage, sids)
+    if out["applied"]:
+        with stage_log("edit", job["doc_id"], job["file_name"], detail=f"LLM 교정 {len(out['applied'])}건"):
+            remerge(settings, storage, job)
+    return out
 
 
 def remerge(settings: Settings, storage: DocStorage, job: dict) -> None:

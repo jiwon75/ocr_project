@@ -11,7 +11,7 @@
   POST  /api/documents/{doc_id}/blocks/{block_id}/retry
   PATCH /api/documents/{doc_id}/blocks/{block_id}   사용자 수정(edited_text)
   GET   /api/documents/{doc_id}/pages/{page}/image  원본 페이지 이미지
-  GET   /api/documents/{doc_id}/result?format=txt|md&page_separator=&debug=
+  GET   /api/documents/{doc_id}/result?format=txt|md|pdf|pptx&page_separator=&debug=
 
 [왜 이렇게 나눴는지]
 API 함수는 "요청이 올바른지 검사하고, pipeline 의 함수를 부르고, 응답을 만드는 것"만 한다.
@@ -23,13 +23,14 @@ import zipfile
 
 import pymupdf
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app import db
 from app.logger import log_ctx, logger, stage_log
 from app.models.schemas import EditRequest, StatusResponse, UploadResponse
 from app.pipeline import runner
 from app.pipeline.engines import LANGUAGES
+from app.pipeline import export
 from app.pipeline.merge import load_results, merge_document, render_block
 from app.pipeline.status import read_status, update_status
 from app.pipeline.storage import DocStorage, is_valid_block_id, is_valid_doc_id, read_json
@@ -260,19 +261,35 @@ def get_page_image(request: Request, doc_id: str, page: int):
     return FileResponse(path, media_type="image/png")
 
 
+BINARY_TYPES = {
+    "pdf": "application/pdf",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
+
 @router.get("/{doc_id}/result", response_class=PlainTextResponse)
 def get_result(request: Request, doc_id: str, format: str = "txt", page_separator: bool | None = None, debug: bool = False):
-    """최종 결과. page_separator 를 주지 않으면 .env 의 MERGE_PAGE_SEPARATOR 를 따른다."""
+    """
+    최종 결과. page_separator 를 주지 않으면 .env 의 MERGE_PAGE_SEPARATOR 를 따른다.
+    pdf(글자 선택·편집 가능한 PDF) / pptx(PowerPoint) 는 파일로 돌려준다 (app/pipeline/export.py).
+    """
     settings = request.app.state.settings
     storage = _storage(request, doc_id)
-    if format not in ("txt", "md"):
-        raise HTTPException(400, "format 은 txt 또는 md 여야 합니다.")
+    if format not in ("txt", "md", *BINARY_TYPES):
+        raise HTTPException(400, "format 은 txt, md, pdf, pptx 중 하나여야 합니다.")
     status = read_status(storage) or {}
     if status.get("state") != "done":
         raise HTTPException(409, "아직 처리가 끝나지 않았거나 실패한 문서입니다.")
     structure = load_structure(storage)
+    if format in BINARY_TYPES:
+        results = load_results(storage, structure)
+        skip = settings.MERGE_SKIP_PAGE_FURNITURE
+        with stage_log("export", doc_id, status.get("file_name", ""), detail=format):
+            data = (export.to_pdf(structure, results, storage, skip, debug) if format == "pdf"
+                    else export.to_pptx(structure, results, storage, skip))
+        return Response(data, media_type=BINARY_TYPES[format])
     sep = settings.MERGE_PAGE_SEPARATOR if page_separator is None else page_separator
-    text = merge_document(structure, load_results(storage, structure), format, sep, debug)
+    text = merge_document(structure, load_results(storage, structure), format, sep, debug, settings.MERGE_SKIP_PAGE_FURNITURE)
     media = "text/markdown; charset=utf-8" if format == "md" else "text/plain; charset=utf-8"
     return PlainTextResponse(text, media_type=media)
 

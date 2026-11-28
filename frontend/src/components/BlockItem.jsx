@@ -4,9 +4,82 @@
  *
  * - 텍스트는 서버가 합칠 때 쓰는 것과 똑같은 글자(rendered)를 보여 준다. 화면과 다운로드 결과가 달라지지 않게 하기 위해서다.
  * - [규칙 2] 수정은 edited_text 로만 저장된다. 원본 OCR 결과는 "원본 보기"로 언제든 확인할 수 있다.
+ * - 표 칸 하나만 고친 것(AI 도우미 교정 제안 수락)은 칸의 edited_text 에 저장되고, 표 안에서 색으로 표시한다.
  */
 import { useState } from 'react'
 import { BLOCK_TYPES, FAILURE_REASONS } from '../config'
+
+/** [규칙 2] 서버(merge.py)와 같은 실패 표시 */
+const failMark = (blockId, where) => `[추출 실패: ${blockId} ${where}]`
+
+const pieceText = (blockId, piece, where) => (piece.status === 'failed' ? failMark(blockId, where) : piece.text ?? '')
+
+/**
+ * 표 블록 결과(result.table)를 HTML 표로 그린다. 병합 칸(rowspan/colspan)도 그대로 살린다.
+ * 표 제목(caption)은 표 위에, 칸 밖 글자(자막 등, outside_text)는 표 아래에 둔다 — 다운로드 결과와 같은 순서.
+ */
+function TableView({ blockId, result }) {
+  const { n_rows: nRows, cells, caption } = result.table
+  // 표 위 글자(제목·배너). 예전 결과는 caption 한 조각만 있다
+  const head = [...(caption ? [caption] : []), ...(result.table.head_text ?? [])]
+  const rows = Array.from({ length: nRows }, () => [])
+  for (const c of cells) if (c.row < nRows) rows[c.row].push(c)
+  rows.forEach((row) => row.sort((a, b) => a.col - b.col))
+  const outside = result.outside_text ?? []
+
+  return (
+    <div className="table-view">
+      {head.map((p, i) => (
+        <p key={i} className={`table-caption ${p.status === 'failed' ? 'fail' : ''}`}>
+          {pieceText(blockId, p, '제목')}
+        </p>
+      ))}
+      <div className="table-scroll">
+        <table>
+          <tbody>
+            {rows.map((row, r) => (
+              <tr key={r}>
+                {row.map((c) => {
+                  const cellEdited = c.edited_text != null
+                  const failed = c.status === 'failed' && !cellEdited
+                  const Tag = r === 0 ? 'th' : 'td'
+                  return (
+                    <Tag
+                      key={c.col}
+                      rowSpan={c.rowspan > 1 ? c.rowspan : undefined}
+                      colSpan={c.colspan > 1 ? c.colspan : undefined}
+                      className={failed ? 'fail' : cellEdited ? 'edited' : undefined}
+                      title={
+                        cellEdited
+                          ? `수정됨 (원래 OCR: ${c.raw_text ?? ''})`
+                          : c.confidence != null
+                            ? `신뢰도 ${(c.confidence * 100).toFixed(1)}%`
+                            : undefined
+                      }
+                    >
+                      {cellEdited
+                        ? c.edited_text
+                        : failed
+                        ? c.uncertain_text
+                          ? `${c.uncertain_text} (?)`
+                          : failMark(blockId, `r${c.row + 1}c${c.col + 1}`)
+                        : c.text}
+                    </Tag>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {outside.map((p, i) => (
+        <p key={i} className={`table-outside ${p.status === 'failed' ? 'fail' : ''}`}>
+          {pieceText(blockId, p, '표 밖')}
+        </p>
+      ))}
+    </div>
+  )
+}
 
 export default function BlockItem({ block, selected, onSelect, onRetry, onEdit, registerItem }) {
   const [editing, setEditing] = useState(false)
@@ -18,8 +91,13 @@ export default function BlockItem({ block, selected, onSelect, onRetry, onEdit, 
   const type = BLOCK_TYPES[block.type] ?? { label: block.type, color: '#495057' }
   const pending = block.status === 'pending'
   const failed = block.status === 'failed'
-  const edited = r?.edited_text != null
+  const blockEdited = r?.edited_text != null
+  const cellsEdited = r?.table?.cells?.some((c) => c.edited_text != null) ?? false
+  const edited = blockEdited || cellsEdited
   const failedCells = r?.failed_cells ?? 0
+  // 표 블록은 글자(탭 구분) 대신 실제 표로 그린다. 한글 폭 때문에 탭으로는 열이 맞지 않기 때문.
+  // 사용자가 고친 내용(edited_text)은 자유 글자라 그대로 글자로 보여 준다
+  const showAsTable = block.type === 'table' && r?.status === 'done' && !blockEdited && r?.table?.cells?.length > 0
 
   const startEdit = (e) => {
     e.stopPropagation()
@@ -78,11 +156,15 @@ export default function BlockItem({ block, selected, onSelect, onRetry, onEdit, 
             <button onClick={() => setEditing(false)}>취소</button>
           </div>
         </div>
+      ) : showAsTable ? (
+        <TableView blockId={block.block_id} result={r} />
       ) : (
-        <pre className="rendered">{block.rendered}</pre>
+        // 차트는 아래에 값 표를 따로 그리므로 여기서는 자리표시자(첫 줄)만 보여 준다
+        <pre className="rendered">{r?.chart_table ? block.rendered.split('\n\n')[0] : block.rendered}</pre>
       )}
 
-      {block.type === 'image' && r?.ocr_text && <p className="sub">그림 속 글자: {r.ocr_text}</p>}
+      {block.type === 'image' && r?.chart_table && <TableView blockId={block.block_id} result={{ table: r.chart_table }} />}
+      {block.type === 'image' && r?.ocr_text && !r?.chart_table && <p className="sub">그림 속 글자: {r.ocr_text}</p>}
 
       <div className="row actions">
         {!editing && !pending && r && (

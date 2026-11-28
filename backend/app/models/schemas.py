@@ -49,3 +49,8 @@ class StatusResponse(BaseModel):
 class EditRequest(BaseModel):
     # None 을 보내면 수정 취소 (원래 OCR 결과로 되돌림)
     edited_text: str | None = Field(default=None, description="사용자가 고친 텍스트. null 이면 수정 취소")
+
+
+class ApplyCorrectionsRequest(BaseModel):
+    # 적용할 LLM 교정 제안 번호(sid) 목록. 제안 목록은 GET /api/documents/{doc_id}/assist 의 corrections.suggestions
+    sids: list[int] = Field(..., min_length=1, description="적용할 제안 번호")

@@ -23,11 +23,29 @@ PaddleOCR 모델들을 불러오고, 파이프라인이 쓰기 쉬운 함수 4�
 - bbox(bounding box): 블록을 감싸는 사각형 좌표 [x1, y1, x2, y2]. (x1,y1)=왼쪽 위, (x2,y2)=오른쪽 아래, 단위는 픽셀
 """
 import os
+import re
 
 import numpy as np
 
 # 언어 선택값 → 사용할 인식 모델. auto 는 두 모델을 모두 돌려 줄마다 점수가 높은 쪽을 고른다
 LANGUAGES = ("auto", "ko", "en")
+
+_HANGUL_RE = re.compile(r"[가-힣]")
+
+
+def pick_language(cands: dict[str, dict], ko_threshold: float) -> str:
+    """
+    auto 일 때 줄마다 어느 모델 결과를 쓸지 고른다.
+    받는 값: {"ko": {"text", "confidence"}, "en": {...}} (언어 하나만 있어도 됨), 한국어 우선 기준 점수
+    - 한국어 모델이 한글을 포함해 기준 점수 이상으로 읽었으면 한국어 결과를 쓴다.
+      영어 모델은 한글을 아예 모르므로 "324원" 을 "324" 로 읽고도 점수를 더 높게(0.9999) 매긴다.
+      점수만 비교하면 이렇게 한글이 조용히 사라진다.
+    - 그 밖에는 더 자신 있는 쪽을 고른다. (한국어 줄을 영어 모델로 읽으면 엉터리 글자와 낮은 점수가 나와 걸러진다)
+    """
+    ko = cands.get("ko")
+    if ko and ko["confidence"] >= ko_threshold and _HANGUL_RE.search(ko["text"] or ""):
+        return "ko"
+    return max(cands, key=lambda lang: cands[lang]["confidence"])
 
 
 class PaddleEngines:
@@ -46,7 +64,12 @@ class PaddleEngines:
         from paddleocr import LayoutDetection, TableStructureRecognition, TextDetection, TextRecognition
 
         self.layout_model = LayoutDetection(model_name=settings.LAYOUT_MODEL, threshold=settings.LAYOUT_THRESHOLD)
-        self.det_model = TextDetection(model_name=settings.TEXT_DET_MODEL)
+        self.det_model = TextDetection(
+            model_name=settings.TEXT_DET_MODEL,
+            box_thresh=settings.TEXT_DET_BOX_THRESH,
+            unclip_ratio=settings.TEXT_DET_UNCLIP_RATIO,
+        )
+        self.ko_threshold = settings.OCR_CONFIDENCE_THRESHOLD
         # 한국어/영어 모델을 둘 다 미리 불러 둔다. 요청이 왔을 때 불러오면 그 요청만 몇 초 더 느려지기 때문
         self.rec_models = {
             "ko": TextRecognition(model_name=settings.TEXT_REC_MODEL_KO),
@@ -115,9 +138,7 @@ class PaddleEngines:
         results = []
         for i in range(len(images)):
             cands = {lang: {"text": per_lang[lang][i][0], "confidence": per_lang[lang][i][1]} for lang in langs}
-            # 한국어·영어가 섞인 문서도 줄마다 더 자신 있는 모델의 결과를 고른다.
-            # 한국어 줄을 영어 모델로 읽으면 엉터리 글자와 낮은 점수가 나오므로 자연스럽게 걸러진다
-            best = max(langs, key=lambda lang: cands[lang]["confidence"])
+            best = pick_language(cands, self.ko_threshold)
             results.append({**cands[best], "lang": best, "candidates": cands if language == "auto" else None})
         return results
 

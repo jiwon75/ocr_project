@@ -117,7 +117,31 @@ def ocr_lines(ctx: ProcessContext, crop: np.ndarray) -> list[dict]:
         kept.append([x1, y1, x2, y2])
     recs = ctx.engines.recognize(images, ctx.language)
     lines = [{**rec, "box": box} for rec, box in zip(recs, kept)]
-    return sort_lines(lines)
+    return sort_lines(drop_duplicate_lines(lines))
+
+
+def drop_duplicate_lines(lines: list[dict]) -> list[dict]:
+    """
+    같은 글자를 겹친 자리에서 두 번 검출한 줄을 하나만 남긴다 (실제 사례: 표 머리글 "구분" 이 넓은 상자·좁은 상자로 두 번 잡혀
+    두 칸에 "구분" 이 나왔다). 작은 상자의 60% 이상이 겹치고 글자가 같을 때만 지운다. 점수가 높은 쪽, 같으면 작은 상자를 남긴다.
+    """
+    def area(b):
+        return max(1e-6, (b[2] - b[0]) * (b[3] - b[1]))
+
+    drop = set()
+    for i, a in enumerate(lines):
+        for j in range(i + 1, len(lines)):
+            b = lines[j]
+            if i in drop or j in drop or a["text"].strip() != b["text"].strip() or not a["text"].strip():
+                continue
+            iw = min(a["box"][2], b["box"][2]) - max(a["box"][0], b["box"][0])
+            ih = min(a["box"][3], b["box"][3]) - max(a["box"][1], b["box"][1])
+            if iw <= 0 or ih <= 0 or iw * ih < 0.6 * min(area(a["box"]), area(b["box"])):
+                continue
+            ka = (a.get("confidence") or 0, -area(a["box"]))
+            kb = (b.get("confidence") or 0, -area(b["box"]))
+            drop.add(j if ka >= kb else i)
+    return [l for k, l in enumerate(lines) if k not in drop]
 
 
 def read_lines(ctx: ProcessContext, block: dict, crop: np.ndarray, offset: tuple[float, float]) -> tuple[list[dict], str]:

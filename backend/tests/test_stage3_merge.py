@@ -21,15 +21,22 @@ def test_txt_output_in_order(tmp_path, run_doc):
     expected_order = ["테스트 문서 제목", "첫 번째 문단입니다.", "[추출 실패: p1-b003]", "[추출 실패: p1-b004]", "항목\t값", "[이미지: p1-b006]"]
     positions = [txt.index(s) for s in expected_order]
     assert positions == sorted(positions)
-    assert "사과\t[추출 실패: p1-b005 r2c2]" in txt  # 표는 탭 구분, 실패 셀은 블록+셀 번호
+    assert "사과\t흐린셀 (?)" in txt  # 표는 탭 구분, 신뢰도 미달 셀은 읽은 글자 + (?) (TABLE_SHOW_UNCERTAIN_TEXT)
 
 
 def test_md_output_title_table_image(tmp_path, run_doc):
     _, _, st, _ = run_doc(samples.make_fake_page(tmp_path / "p.png"), "png", FakeEngines())
     md = _merged(st, "md", page_separator=True)
     assert "# 테스트 문서 제목" in md
-    assert "| 항목 | 값 |\n| --- | --- |\n| 사과 | [추출 실패: p1-b005 r2c2] |" in md
+    assert "| 항목 | 값 |\n| --- | --- |\n| 사과 | 흐린셀 (?) |" in md
     assert "![[이미지: p1-b006]](blocks/p1-b006.png)" in md
+
+
+def test_failed_cell_marker_when_uncertain_text_off(tmp_path, run_doc, settings):
+    """TABLE_SHOW_UNCERTAIN_TEXT=false 면 예전처럼 [추출 실패: 블록 셀번호] 로 표시한다 ([규칙 2])."""
+    settings.TABLE_SHOW_UNCERTAIN_TEXT = False
+    _, _, st, _ = run_doc(samples.make_fake_page(tmp_path / "p.png"), "png", FakeEngines())
+    assert "사과\t[추출 실패: p1-b005 r2c2]" in _merged(st, "txt")
 
 
 def test_page_separator_and_debug(tmp_path, run_doc):
@@ -38,7 +45,7 @@ def test_page_separator_and_debug(tmp_path, run_doc):
     assert "--- page 2 ---" in with_sep and "--- page 1 ---" not in with_sep
     assert "--- page" not in _merged(st, "txt", page_separator=False)
     debug = _merged(st, "md", page_separator=False, debug=True)
-    assert "<!-- p1-b001 -->" in debug and "<!-- p2-b001 -->" in debug
+    assert "[블록 p1-b001]" in debug and "[블록 p2-b001]" in debug
 
 
 def test_merge_follows_order_field_not_file_order():
@@ -51,15 +58,57 @@ def test_merge_follows_order_field_not_file_order():
     assert merge_document(structure, results, "txt") == "첫째\n\n둘째\n"
 
 
-def test_merged_table_with_spans_becomes_html():
+def test_merged_table_with_spans_stays_markdown():
     table = {"n_rows": 2, "n_cols": 2, "cells": [
         {"row": 0, "col": 0, "rowspan": 1, "colspan": 2, "text": "병합", "status": "done"},
         {"row": 1, "col": 0, "rowspan": 1, "colspan": 1, "text": "a|b", "status": "done"},
         {"row": 1, "col": 1, "rowspan": 1, "colspan": 1, "text": "c", "status": "done"},
     ]}
     md = table_to_markdown("p1-b001", table)
-    assert '<td colspan="2">병합</td>' in md
+    assert md == "| 병합 |  |\n| --- | --- |\n| a\\|b | c |"  # HTML 없이, 병합 글자는 첫 칸·가려진 칸은 빈칸
     assert table_to_tsv("p1-b001", table) == "병합\t\na|b\tc"  # 가려진 칸은 빈칸으로 자리 유지
+
+
+def test_table_caption_and_outside_text_rendered():
+    structure = {"blocks": [{"block_id": "p1-b001", "order": 1, "page": 1, "type": "table"}]}
+    table = {"n_rows": 2, "n_cols": 2, "caption": {"text": "가격 비교", "status": "done"}, "cells": [
+        {"row": 0, "col": 0, "rowspan": 1, "colspan": 1, "text": "순위", "status": "done"},
+        {"row": 0, "col": 1, "rowspan": 1, "colspan": 1, "text": "가격", "status": "done"},
+        {"row": 1, "col": 0, "rowspan": 1, "colspan": 1, "text": "1", "status": "done"},
+        {"row": 1, "col": 1, "rowspan": 1, "colspan": 1, "text": "168원", "status": "done"},
+    ]}
+    outside = [{"text": "자막 글자", "status": "done"}, {"text": None, "raw_text": "??", "status": "failed"}]
+    results = {"p1-b001": {"status": "done", "table": table, "outside_text": outside}}
+    md = merge_document(structure, results, "md")
+    assert md == ("가격 비교\n\n| 순위 | 가격 |\n| --- | --- |\n| 1 | 168원 |\n\n자막 글자\n\n"
+                  "[추출 실패: p1-b001 표 밖]\n")
+    assert merge_document(structure, results, "txt").startswith("가격 비교\n\n순위\t가격\n1\t168원\n\n자막 글자")
+
+
+def test_page_furniture_skipped_from_output_only_when_enabled():
+    structure = {"blocks": [
+        {"block_id": "p1-b001", "order": 1, "page": 1, "type": "text", "source": "ocr"},
+        {"block_id": "p1-b002", "order": 2, "page": 1, "type": "footer", "source": "ocr"},
+        {"block_id": "p1-b003", "order": 3, "page": 1, "type": "header", "source": "hwp"},
+    ]}
+    results = {"p1-b001": {"status": "done", "text": "본문"}, "p1-b002": {"status": "done", "text": "10:10/11:54"},
+               "p1-b003": {"status": "done", "text": "머리말"}}
+    assert merge_document(structure, results, "txt", skip_page_furniture=True) == "본문\n\n머리말\n"  # HWP 머리말은 유지
+    assert "10:10/11:54" in merge_document(structure, results, "txt", skip_page_furniture=False)
+
+
+def test_failed_uncovered_text_block_left_out_and_chart_table_rendered():
+    structure = {"blocks": [
+        {"block_id": "p1-b001", "order": 1, "page": 1, "type": "image", "label": "chart", "source": "ocr"},
+        {"block_id": "p1-b002", "order": 2, "page": 1, "type": "text", "label": "uncovered_text", "source": "ocr"},
+    ]}
+    chart = {"n_rows": 2, "n_cols": 2, "cells": [
+        {"row": 0, "col": 0, "text": "구분", "status": "done"}, {"row": 0, "col": 1, "text": "값", "status": "done"},
+        {"row": 1, "col": 0, "text": "1번", "status": "done"}, {"row": 1, "col": 1, "text": "543", "status": "done"}]}
+    results = {"p1-b001": {"status": "done", "image_path": "p1-b001.png", "chart_table": chart},
+               "p1-b002": {"status": "failed", "text": None}}  # 화면 아이콘 잡음
+    md = merge_document(structure, results, "md")
+    assert md == "![[이미지: p1-b001]](blocks/p1-b001.png)\n\n| 구분 | 값 |\n| --- | --- |\n| 1번 | 543 |\n"
 
 
 def test_db_saved_after_merge(tmp_path, run_doc, settings):

@@ -8,7 +8,7 @@
 import { API_URL } from '../config'
 
 /** API 호출 공통 함수. 실패하면 backend 가 보낸 한국어 오류 문장(detail)을 담아 Error 를 던진다. */
-async function request(path, { raw = false, ...options } = {}) {
+async function request(path, { raw = false, blob = false, ...options } = {}) {
   const isForm = options.body instanceof FormData
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -21,6 +21,7 @@ async function request(path, { raw = false, ...options } = {}) {
     error.status = res.status
     throw error
   }
+  if (blob) return res.blob()
   return raw ? res.text() : res.json()
 }
 
@@ -54,6 +55,19 @@ export const api = {
     const q = new URLSearchParams({ format, page_separator: pageSeparator, debug })
     return request(`/documents/${docId}/result?${q}`, { raw: true })
   },
+
+  /** 편집 가능한 PDF / PowerPoint 파일(Blob). 서버가 그때그때 만든다 (backend/app/pipeline/export.py) */
+  resultFile(docId, format, { debug = false } = {}) {
+    const q = new URLSearchParams({ format, debug })
+    return request(`/documents/${docId}/result?${q}`, { blob: true })
+  },
+
+  // ---- LLM 도우미 (Ollama) — 선택 기능. 꺼져 있으면 assistStatus 의 message 에 이유가 온다 ----
+  assistStatus: () => request('/assist/status'),
+  assist: (docId) => request(`/documents/${docId}/assist`),
+  startAssist: (docId, kind) => request(`/documents/${docId}/assist/${kind}`, { method: 'POST' }),
+  applyCorrections: (docId, sids) =>
+    request(`/documents/${docId}/assist/corrections/apply`, { method: 'POST', body: JSON.stringify({ sids }) }),
 
   pageImageUrl: (docId, page) => `${API_URL}/documents/${docId}/pages/${page}/image`,
 }
