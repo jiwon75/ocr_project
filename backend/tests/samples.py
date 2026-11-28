@@ -11,11 +11,20 @@ from pathlib import Path
 import pymupdf
 from PIL import Image, ImageDraw, ImageFont
 
-KOREAN_FONT = Path(r"C:\Windows\Fonts\malgun.ttf")
+# 운영체제마다 한글 글꼴 위치가 달라서 후보를 차례로 찾는다.
+# 한글 글꼴이 없으면 기본 글꼴로 그리게 되는데, 기본 글꼴엔 한글이 없어 그림에 한글이 깨져 들어가고
+# 실제 모델 테스트가 "한글을 못 읽음"으로 실패한다(코드 문제가 아니라 샘플 문제). 그래서 OS별 경로를 모두 둔다.
+KOREAN_FONT_CANDIDATES = [
+    Path(r"C:\Windows\Fonts\malgun.ttf"),                          # Windows: 맑은 고딕
+    Path("/System/Library/Fonts/AppleSDGothicNeo.ttc"),            # macOS: 애플 SD 산돌고딕 Neo
+    Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),       # Linux: 나눔고딕
+    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),  # Linux: Noto Sans CJK
+]
+KOREAN_FONT = next((p for p in KOREAN_FONT_CANDIDATES if p.exists()), None)
 
 
 def font(size: int):
-    if KOREAN_FONT.exists():
+    if KOREAN_FONT is not None:
         return ImageFont.truetype(str(KOREAN_FONT), size)
     return ImageFont.load_default(size)
 
