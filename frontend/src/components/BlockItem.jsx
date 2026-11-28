@@ -19,6 +19,8 @@ const pieceText = (blockId, piece, where) => (piece.status === 'failed' ? failMa
  */
 function TableView({ blockId, result }) {
   const { n_rows: nRows, cells, caption } = result.table
+  // 표 위 글자(제목·배너). 예전 결과는 caption 한 조각만 있다
+  const head = [...(caption ? [caption] : []), ...(result.table.head_text ?? [])]
   const rows = Array.from({ length: nRows }, () => [])
   for (const c of cells) if (c.row < nRows) rows[c.row].push(c)
   rows.forEach((row) => row.sort((a, b) => a.col - b.col))
@@ -26,7 +28,11 @@ function TableView({ blockId, result }) {
 
   return (
     <div className="table-view">
-      {caption && <p className={`table-caption ${caption.status === 'failed' ? 'fail' : ''}`}>{pieceText(blockId, caption, '제목')}</p>}
+      {head.map((p, i) => (
+        <p key={i} className={`table-caption ${p.status === 'failed' ? 'fail' : ''}`}>
+          {pieceText(blockId, p, '제목')}
+        </p>
+      ))}
       <div className="table-scroll">
         <table>
           <tbody>
@@ -141,10 +147,12 @@ export default function BlockItem({ block, selected, onSelect, onRetry, onEdit, 
       ) : showAsTable ? (
         <TableView blockId={block.block_id} result={r} />
       ) : (
-        <pre className="rendered">{block.rendered}</pre>
+        // 차트는 아래에 값 표를 따로 그리므로 여기서는 자리표시자(첫 줄)만 보여 준다
+        <pre className="rendered">{r?.chart_table ? block.rendered.split('\n\n')[0] : block.rendered}</pre>
       )}
 
-      {block.type === 'image' && r?.ocr_text && <p className="sub">그림 속 글자: {r.ocr_text}</p>}
+      {block.type === 'image' && r?.chart_table && <TableView blockId={block.block_id} result={{ table: r.chart_table }} />}
+      {block.type === 'image' && r?.ocr_text && !r?.chart_table && <p className="sub">그림 속 글자: {r.ocr_text}</p>}
 
       <div className="row actions">
         {!editing && !pending && r && (

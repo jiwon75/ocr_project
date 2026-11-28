@@ -184,6 +184,24 @@ def uncovered_text_blocks(engines, page_rgb: np.ndarray, blocks: list[dict], sou
                 break
         else:
             groups.append(list(b))
+    # 겹치거나 바로 위아래로 붙은 묶음은 한 블록(문단)으로 합친다. 따로 두면 블록을 잘라 읽을 때 옆 줄 글자까지
+    # 함께 읽혀 같은 글이 두 번 나온다 (실제 사례: 세 줄짜리 배너 "누구나 평생 마르지 않는…" 이 중복 출력됐다)
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                a, b = groups[i], groups[j]
+                gap = 0.6 * min(a[3] - a[1], b[3] - b[1])
+                x_touch = min(a[2], b[2]) - max(a[0], b[0]) > 0
+                y_touch = min(a[3], b[3]) - max(a[1], b[1]) > -gap
+                if x_touch and y_touch:
+                    groups[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+                    del groups[j]
+                    merged = True
+                    break
+            if merged:
+                break
     return found + [
         {"type": "text", "label": "uncovered_text", "score": None,
          "bbox": [round(v, 1) for v in g], "source": source}
@@ -216,6 +234,10 @@ def detect_page_blocks(engines, page_rgb: np.ndarray, page_info: dict, sweep_unc
                 "source": "text-layer" if page_info.get("text_layer") else "ocr",
             }
         )
+    # 표 블록 안에 거의 다 들어간 다른 블록은 뺀다. 표 처리가 표 영역의 모든 글자를 표 칸·표 위·표 아래로 이미 쓰므로
+    # 그대로 두면 같은 글이 두 번 나온다 (실제 사례: 표 영역에 화면 오른쪽 위 배너까지 들어가 배너가 두 번 출력됐다)
+    tables = [b for b in blocks if b["type"] == "table"]
+    blocks = [b for b in blocks if b["type"] == "table" or not any(_mostly_inside(b["bbox"], t["bbox"], 0.8) for t in tables)]
     if not blocks:
         blocks = [
             {

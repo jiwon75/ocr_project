@@ -231,6 +231,74 @@ def test_grid_from_lines_rebuilds_rows_and_caption():
     assert structure_agrees([{"_lines": c["_lines"]} for c in grid["cells"]], grid)
 
 
+def test_grid_from_lines_merged_label_column():
+    """병합 칸 열("월 25만원" 이 두 행에 걸침)은 새 열이 되고, 병합 글자는 그룹의 첫 행에 들어간다."""
+    def L(t, x, y, row, w=30):
+        return {"text": t, "confidence": 0.99, "box": [x, y, x + w, y + 30], "row": row}
+
+    lines = [
+        L("구분", 90, 0, 0), L("1년차", 200, 0, 0), L("5년차", 300, 0, 0),
+        L("배당재투자O", 100, 50, 1, 60), L("1", 200, 50, 1), L("5", 300, 50, 1),
+        L("월 25만원", 0, 75, 2, 60),  # 두 행 사이 높이
+        L("배당재투자X", 100, 100, 3, 60), L("1", 200, 100, 3), L("5", 300, 100, 3),
+        L("배당재투자O", 100, 150, 4, 60), L("2", 200, 150, 4), L("11", 300, 150, 4),
+        L("월 50만원", 0, 175, 5, 60),
+        L("배당재투자X", 100, 200, 6, 60), L("2", 200, 200, 6), L("10", 300, 200, 6),
+    ]
+    grid = grid_from_lines(lines)
+    assert (grid["n_rows"], grid["n_cols"]) == (5, 4)
+    rows = {}
+    for c in grid["cells"]:
+        rows.setdefault(c["row"], {})[c["col"]] = " ".join(l["text"] for l in c["_lines"])
+    assert [rows[r][0] for r in range(5)] == ["", "월 25만원", "", "월 50만원", ""]
+    assert rows[0][1] == "구분"
+    assert rows[1][1] == "배당재투자O" and rows[2][1] == "배당재투자X"
+
+
+def test_drop_duplicate_lines_keeps_one():
+    from app.pipeline.processors.common import drop_duplicate_lines
+
+    lines = [{"text": "구분", "confidence": 1.0, "box": [24, 258, 400, 336]},
+             {"text": "구분", "confidence": 1.0, "box": [310, 264, 405, 332]},
+             {"text": "1년차", "confidence": 1.0, "box": [665, 264, 785, 330]}]
+    kept = drop_duplicate_lines(lines)
+    assert [l["box"] for l in kept] == [[310, 264, 405, 332], [665, 264, 785, 330]]  # 같은 점수면 작은 상자
+
+
+def test_chart_to_table_from_bar_labels():
+    """막대 위 값·항목 이름·범례로 값 표를 만들고, 세로축 눈금과 신뢰도 미달 숫자(포인터 점)는 뺀다."""
+    from app.pipeline.processors.common import sort_lines
+    from app.pipeline.processors.image import chart_to_table
+
+    def L(t, x, y, c=0.99):
+        return {"text": t, "confidence": c, "box": [x, y, x + 30, y + 20]}
+
+    lines = sort_lines([
+        L("20", 5, 10), L("10", 5, 110), L("0", 5, 210),  # 세로축 눈금
+        L("18", 100, 20), L("12", 140, 80), L("0", 160, 30, 0.5),  # 0 은 포인터 점(신뢰도 미달)
+        L("9", 300, 120), L("4.5", 340, 160),
+        L("25만원", 120, 240), L("50만원", 320, 240),
+        L("1번2번", 200, 280),  # 범례가 한 줄로 붙어 읽힘
+    ])
+    t = chart_to_table(lines, 0.8)
+    rows = {}
+    for c in t["cells"]:
+        rows.setdefault(c["row"], []).append(c["text"])
+    assert rows == {0: ["구분", "1번", "2번"], 1: ["25만원", "18", "12"], 2: ["50만원", "9", "4.5"]}
+
+
+def test_strip_sparse_edge_rows_moves_title_and_unit_out():
+    from app.pipeline.processors.table import _strip_sparse_edge_rows
+
+    cells = [_cell(0, 0, [0, 0, 50, 30], ["표 제목"]), _cell(0, 1, [50, 0, 100, 30]),
+             _cell(1, 0, [0, 30, 50, 60], ["a"]), _cell(1, 1, [50, 30, 100, 60], ["b"]),
+             _cell(2, 0, [0, 60, 50, 90], ["c"]), _cell(2, 1, [50, 60, 100, 90], ["d"]),
+             _cell(3, 0, [0, 90, 50, 120]), _cell(3, 1, [50, 90, 100, 120], ["*단위: 만원"])]
+    cells, n_rows, head, tail = _strip_sparse_edge_rows(cells, 4)
+    assert n_rows == 2 and [l["text"] for l in head] == ["표 제목"] and [l["text"] for l in tail] == ["*단위: 만원"]
+    assert sorted((c["row"], c["col"]) for c in cells) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+
+
 def test_grid_from_lines_none_for_plain_paragraph():
     lines = [{"text": "문장 하나", "confidence": 0.99, "box": [0, 0, 300, 30], "row": 0},
              {"text": "문장 둘", "confidence": 0.99, "box": [0, 40, 280, 70], "row": 1}]

@@ -142,14 +142,28 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
         for i, cell in enumerate(cells):
             cell["box"] = cell_boxes[i]
             cell["_lines"] = per_cell.get(i, [])
-    if line_grid is not None and (not structure_ok or not structure_agrees(cells, line_grid)):
+    agrees = structure_ok and line_grid is not None and structure_agrees(cells, line_grid)
+    if structure_ok:
+        # 구조 모델 결과 다듬기: 엇갈린 열 합치기 → 맨 위·아래의 "글자가 한 칸뿐인 행"(제목·배너·단위 표시)을 표 밖으로
+        cells, n_rows, n_cols, caption_cell = tidy_table(cells, n_rows, n_cols)
+        cells, n_rows, head_extra, tail_extra = _strip_sparse_edge_rows(cells, n_rows)
+    use_lines = line_grid is not None and (
+        not structure_ok
+        or not agrees
+        # 다듬은 뒤에도 열 수가 글자 줄 표와 다르면(제목·배너까지 표로 잡아 열이 늘어난 경우) 글자 줄 표를 쓴다
+        or n_cols != line_grid["n_cols"]
+    )
+    if use_lines:
         # 구조 모델이 서로 다른 행의 글자를 한 칸에 넣었다 = 행·열을 잘못 나눴다. 글자 줄 위치로 만든 칸을 쓴다
         cells, n_rows, n_cols = line_grid["cells"], line_grid["n_rows"], line_grid["n_cols"]
         caption_lines, unassigned = line_grid["head"], line_grid["tail"]
         result["grid_source"] = "lines"
     elif structure_ok:
-        cells, n_rows, n_cols, caption_cell = tidy_table(cells, n_rows, n_cols)
-        caption_lines = caption_cell.pop("_lines") if caption_cell is not None else []
+        caption_lines = (caption_cell.pop("_lines") if caption_cell is not None else []) + head_extra
+        # 칸에 못 들어간 줄 중 표 첫 행보다 위에 있는 것(화면 제목 옆 배너 등)은 표 위에, 나머지는 표 아래에 쓴다
+        top = min((l["box"][1] for c in cells for l in c["_lines"]), default=0)
+        caption_lines += [l for l in unassigned if l["box"][3] <= top]
+        unassigned = [l for l in unassigned if l["box"][3] > top] + tail_extra
         result["grid_source"] = "structure"
     else:
         # 구조도 못 알아내고 글자 줄로도 표 모양이 안 나오면 표 전체를 실패로 둔다.
@@ -162,11 +176,6 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
         )
         return result
 
-    # 표 제목 줄 중 신뢰도 기준 미달인 조각(예: 화면 구석 로고의 일부)은 제목에서 뺀다. JSON 의 noise_lines 에 남긴다
-    noise = [l for l in caption_lines if l.get("confidence") is not None and l["confidence"] < threshold]
-    caption_lines = [l for l in caption_lines if l not in noise]
-    caption_cell = {"_lines": caption_lines} if caption_lines else None
-    result["noise_lines"] = noise
 
     if source == "ocr":
         reread = reread_empty_cells(ctx, crop, cells, threshold)
@@ -194,12 +203,15 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
         failed_cells += 0 if ok else 1
 
     table = {"n_rows": n_rows, "n_cols": n_cols, "cells": cells}
-    if caption_cell is not None:
-        table["caption"] = _judged_piece(caption_cell.pop("_lines"), threshold, agg)
 
-    # 표 영역 안이지만 어느 칸에도 속하지 않는 글자(예: 영상 자막, 표 아래 주석).
-    # 버리면 글자가 소리 없이 사라지므로, 3단계에서 표 아래에 이어 쓴다
-    outside = [_judged_piece([line], threshold, agg) for line in sort_lines(unassigned)]
+    # 표 위쪽 글자(제목·배너)와 표 영역 안이지만 칸 밖인 글자(자막·단위 표시)는 버리지 않고 3단계에서 표 위·아래에 쓴다.
+    # 줄(같은 높이)마다 한 조각으로 만든다. 신뢰도 기준 미달인 조각(로고 일부·아이콘 등 잡음)은 결과에 넣지 않고
+    # JSON 의 noise_lines 에 남긴다 — 칸 밖의 짧은 잡음까지 [추출 실패] 로 찍으면 결과가 읽기 어려워지기 때문
+    head, noise_head = _row_pieces(caption_lines, threshold, agg)
+    outside, noise_tail = _row_pieces(unassigned, threshold, agg)
+    if head:
+        table["head_text"] = head
+    result["noise_lines"] = noise_head + noise_tail
 
     result.update(
         status="done",
@@ -258,8 +270,10 @@ def grid_from_lines(lines: list[dict]) -> dict | None:
 
     def is_table_row(row):
         # 줄이 2개 이상이고, 여러 열에 걸친 줄이 없고, 열의 절반 이상을 채운 행만 표의 행으로 본다
+        # (어느 열에도 안 겹치는 줄은 허용한다 — 아래에서 새 열이 되거나 가장 가까운 열에 들어간다)
         col_hits = [hits(l) for l in row]
-        return len(row) >= 2 and all(len(h) == 1 for h in col_hits) and len({h[0] for h in col_hits}) * 2 >= k
+        filled = {h[0] for h in col_hits if len(h) == 1}
+        return len(row) >= 2 and not any(len(h) >= 2 for h in col_hits) and len(filled) * 2 >= k
 
     table_rows = [r for r in order if is_table_row(rows[r])]
     if len(table_rows) < 2:
@@ -267,20 +281,52 @@ def grid_from_lines(lines: list[dict]) -> dict | None:
     first, last = order.index(table_rows[0]), order.index(table_rows[-1])
     head = [l for r in order[:first] for l in rows[r]]
     tail = [l for r in order[last + 1:] for l in rows[r]]
+    middle = order[first:last + 1]
+
+    # 병합 칸으로 된 열(예: "월 25만원" 이 두 행에 걸친 "구분" 열)은 칸이 다 찬 행에 없어서 위에서 열로 잡히지 않는다.
+    # 표 안에서 어느 열에도 안 겹치는 줄이 2개 이상 세로로 모여 있으면 그 범위를 새 열로 더한다
+    loose = sorted([l["box"][0], l["box"][2]] for r in middle for l in rows[r] if not hits(l))
+    extra: list[list] = []  # [x1, x2, 줄 수]
+    for x1, x2 in loose:
+        if extra and x1 <= extra[-1][1]:
+            extra[-1][1] = max(extra[-1][1], x2)
+            extra[-1][2] += 1
+        else:
+            extra.append([x1, x2, 1])
+    cols = sorted(cols + [[x1, x2] for x1, x2, n in extra if n >= 2])
+    n_cols = len(cols)
+
+    def best_col(line):
+        span = [line["box"][0], line["box"][2]]
+        return max(range(n_cols), key=lambda i: (_x_overlap(span, cols[i]), -abs((span[0] + span[1]) - sum(cols[i]))))
+
+    # 표 중간의 "칸이 덜 찬 행"
+    #  - 그 줄들이 들어갈 칸이 바로 위 행에서 비어 있으면 위 행에 붙인다. 병합 칸 글자("월 25만원")는 병합된 두 행
+    #    사이 높이에 따로 한 줄로 잡히는데, 병합 칸은 첫 행에 쓰는 것이 맞기 때문이다
+    #    (가장 가까운 행에 붙이면 그룹마다 위·아래가 들쭉날쭉했다)
+    #  - 아니면 그대로 한 행으로 둔다. 검출이 숫자 몇 개를 놓쳐 덜 찬 진짜 행이다 (빈 칸은 뒤에서 다시 읽는다)
+    grid_rows: dict[int, list[dict]] = {}
+    above = None
+    for r in middle:
+        if r not in table_rows and above is not None:
+            used = {best_col(l) for l in grid_rows[above]}
+            if not ({best_col(l) for l in rows[r]} & used):
+                grid_rows[above] += rows[r]
+                continue
+        grid_rows[r] = list(rows[r])
+        above = r
 
     cells = []
-    for gr, r in enumerate(order[first:last + 1]):
-        row = rows[r]
+    for gr, r in enumerate(sorted(grid_rows)):
+        row = grid_rows[r]
         y1, y2 = min(l["box"][1] for l in row), max(l["box"][3] for l in row)
         per_col: dict[int, list[dict]] = {}
         for line in row:
-            span = [line["box"][0], line["box"][2]]
-            best = max(range(k), key=lambda i: (_x_overlap(span, cols[i]), -abs((span[0] + span[1]) - sum(cols[i]))))
-            per_col.setdefault(best, []).append(line)
-        for c in range(k):
+            per_col.setdefault(best_col(line), []).append(line)
+        for c in range(n_cols):
             cells.append({"row": gr, "col": c, "rowspan": 1, "colspan": 1,
                           "box": [cols[c][0], y1, cols[c][1], y2], "_lines": per_col.get(c, [])})
-    return {"cells": cells, "n_rows": last - first + 1, "n_cols": k, "head": head, "tail": tail}
+    return {"cells": cells, "n_rows": len(grid_rows), "n_cols": n_cols, "head": head, "tail": tail}
 
 
 def structure_agrees(cells: list[dict], line_grid: dict) -> bool:
@@ -293,6 +339,47 @@ def structure_agrees(cells: list[dict], line_grid: dict) -> bool:
         if len({row_of[id(l)] for l in cell.get("_lines", []) if id(l) in row_of}) > 1:
             return False
     return True
+
+
+def _row_pieces(lines: list[dict], threshold: float, agg: str) -> tuple[list[dict], list[dict]]:
+    """
+    줄 목록 → (통과한 조각 목록, 버린 줄 목록). 같은 높이의 줄은 한 조각으로 묶는다.
+    신뢰도 기준 미달인 줄은 조각에서 빼서 버린 줄 목록으로 돌려준다.
+    """
+    # 글자·숫자가 2개 미만인 조각("o", "D", 아이콘)도 잡음으로 본다
+    keep = [l for l in lines if (l.get("confidence") is None or l["confidence"] >= threshold)
+            and len(_MEANINGFUL_RE.findall(l["text"])) >= 2]
+    dropped = [l for l in lines if l not in keep]
+    rows: dict[int, list[dict]] = {}
+    for line in sort_lines(keep):
+        rows.setdefault(line["row"], []).append(line)
+    return [_judged_piece(rows[r], threshold, agg) for r in sorted(rows)], dropped
+
+
+def _strip_sparse_edge_rows(cells: list[dict], n_rows: int):
+    """
+    맨 위·맨 아래에서 "글자가 든 칸이 하나 이하인 행"을 표 밖으로 뺀다 (병합 칸이 걸친 행은 건드리지 않는다).
+    실제 사례: 레이아웃 모델이 화면 제목·배너·"*단위: 만원" 까지 표 영역으로 잡아, 표 맨 위에 제목만 든 행이 생겼다.
+    돌려주는 값: (셀 목록, 행 수, 위쪽으로 뺀 줄, 아래쪽으로 뺀 줄)
+    """
+    head, tail = [], []
+
+    def sparse(r):
+        row = [c for c in cells if c["row"] == r]
+        if any(c["rowspan"] != 1 for c in cells if c["row"] <= r < c["row"] + c["rowspan"] and c["row"] != r):
+            return False
+        return len(row) > 0 and sum(1 for c in row if c["_lines"]) <= 1 and all(c["rowspan"] == 1 for c in row)
+
+    while n_rows > 2 and sparse(0):
+        head += [l for c in cells if c["row"] == 0 for l in c["_lines"]]
+        cells = [c for c in cells if c["row"] != 0]
+        _shift(cells, "row", -1)
+        n_rows -= 1
+    while n_rows > 2 and sparse(n_rows - 1):
+        tail = [l for c in cells if c["row"] == n_rows - 1 for l in c["_lines"]] + tail
+        cells = [c for c in cells if c["row"] != n_rows - 1]
+        n_rows -= 1
+    return cells, n_rows, head, tail
 
 
 def _judged_piece(lines: list[dict], threshold: float, agg: str) -> dict:
@@ -480,6 +567,11 @@ def reread_empty_cells(ctx: ProcessContext, crop, cells: list[dict], threshold: 
 
     found = []
     for cell, rec, box in best.values():
+        neighbours = [c for c in cells if c["row"] == cell["row"] and abs(c["col"] - cell["col"]) == 1]
+        if any(" ".join(l["text"] for l in c["_lines"]).strip() == rec["text"].strip() for c in neighbours):
+            # 옆 칸과 같은 글자 = 두 칸에 걸친(병합된) 글자가 비어 있는 칸 자리까지 넘어온 것. 칸을 채우지 않는다
+            # (실제 사례: 두 칸 병합 머리글 "구분" 이 빈 옆 칸에서 다시 읽혀 "구분 | 구분" 이 됐다)
+            continue
         old = cell["_lines"]
         old_text = " ".join(l["text"] for l in old).strip()
         old_meaningless = bool(old) and not _MEANINGFUL_RE.search(old_text)

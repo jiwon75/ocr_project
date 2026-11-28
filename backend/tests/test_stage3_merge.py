@@ -97,6 +97,20 @@ def test_page_furniture_skipped_from_output_only_when_enabled():
     assert "10:10/11:54" in merge_document(structure, results, "txt", skip_page_furniture=False)
 
 
+def test_failed_uncovered_text_block_left_out_and_chart_table_rendered():
+    structure = {"blocks": [
+        {"block_id": "p1-b001", "order": 1, "page": 1, "type": "image", "label": "chart", "source": "ocr"},
+        {"block_id": "p1-b002", "order": 2, "page": 1, "type": "text", "label": "uncovered_text", "source": "ocr"},
+    ]}
+    chart = {"n_rows": 2, "n_cols": 2, "cells": [
+        {"row": 0, "col": 0, "text": "구분", "status": "done"}, {"row": 0, "col": 1, "text": "값", "status": "done"},
+        {"row": 1, "col": 0, "text": "1번", "status": "done"}, {"row": 1, "col": 1, "text": "543", "status": "done"}]}
+    results = {"p1-b001": {"status": "done", "image_path": "p1-b001.png", "chart_table": chart},
+               "p1-b002": {"status": "failed", "text": None}}  # 화면 아이콘 잡음
+    md = merge_document(structure, results, "md")
+    assert md == "![[이미지: p1-b001]](blocks/p1-b001.png)\n\n| 구분 | 값 |\n| --- | --- |\n| 1번 | 543 |\n"
+
+
 def test_db_saved_after_merge(tmp_path, run_doc, settings):
     _, file_id, st, _ = run_doc(samples.make_fake_page(tmp_path / "p.png"), "png", FakeEngines())
     rows = db.get_extracted_texts(settings.DB_PATH, file_id)

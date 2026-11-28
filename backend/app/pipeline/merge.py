@@ -113,8 +113,15 @@ def render_block(block: dict, result: dict | None, fmt: str) -> str:
 
     if btype == "image":
         if fmt == "md" and result and result.get("image_path"):
-            return f"![{image_marker(block_id)}](blocks/{result['image_path']})"
-        return image_marker(block_id)
+            marker = f"![{image_marker(block_id)}](blocks/{result['image_path']})"
+        else:
+            marker = image_marker(block_id)
+        chart = (result or {}).get("chart_table")
+        if chart:
+            # 막대 차트는 그림 아래에 값 표를 붙인다 (processors/image.py chart_to_table)
+            body = table_to_markdown(block_id, chart) if fmt == "md" else table_to_tsv(block_id, chart)
+            return f"{marker}\n\n{body}"
+        return marker
 
     # [규칙 2] 처리 결과가 없거나(pending) 실패면 내용을 채우지 않고 실패 표시만 한다
     if not result or result.get("status") != "done":
@@ -124,7 +131,9 @@ def render_block(block: dict, result: dict | None, fmt: str) -> str:
         table = result.get("table") or {"cells": [], "n_rows": 0, "n_cols": 0}
         body = table_to_markdown(block_id, table) if fmt == "md" else table_to_tsv(block_id, table)
         # 표 제목(맨 윗줄 전체 병합 칸이었던 글자)은 표 위에, 칸 밖 글자(자막·주석)는 표 아래에 쓴다
-        before = [_piece_text(block_id, table["caption"], "제목")] if table.get("caption") else []
+        before = [_piece_text(block_id, p, "제목") for p in table.get("head_text") or []]
+        if table.get("caption"):  # 예전 형식 결과(제목 한 조각)
+            before.insert(0, _piece_text(block_id, table["caption"], "제목"))
         after = [_piece_text(block_id, p, "표 밖") for p in result.get("outside_text") or []]
         return "\n\n".join(s for s in before + [body] + after if s)
 
@@ -166,10 +175,15 @@ def merge_document(structure: dict, results: dict[str, dict], fmt: str = "txt", 
     for block in sorted(structure["blocks"], key=lambda b: b["order"]):  # [규칙 1] order 순서
         if is_skipped(block, skip_page_furniture):
             continue
+        result = results.get(block["block_id"])
+        if block.get("label") == "uncovered_text" and result and result.get("status") == "failed" and result.get("edited_text") is None:
+            # 레이아웃 블록 밖에서 다시 찾은 글자가 신뢰도 미달이면 결과에 넣지 않는다 (화면 버튼·아이콘 같은 잡음이 대부분).
+            # 레이아웃 모델이 잡은 블록이 아니라 우리가 덧붙인 것이라 [규칙 2]의 "블록을 빼먹지 않는다" 대상이 아니다. 화면에는 보인다
+            continue
         if page_separator and last_page is not None and block["page"] != last_page:
             parts.append(f"--- page {block['page']} ---")
         last_page = block["page"]
-        piece = render_block(block, results.get(block["block_id"]), fmt)
+        piece = render_block(block, result, fmt)
         if debug:
             piece = f"<!-- {block['block_id']} -->\n{piece}"
         parts.append(piece)
