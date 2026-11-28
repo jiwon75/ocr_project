@@ -135,7 +135,11 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
     cell_boxes = structure["cells"][: len(cells)]
     structure_ok = bool(cells) and len(cell_boxes) >= len(cells) and structure["score"] >= ctx.settings.TABLE_STRUCTURE_THRESHOLD
     # 이미지 OCR 은 글자 줄 위치로도 표 칸을 만들어 본다. 구조 모델이 틀렸을 때 대신 쓰기 위해서다
-    line_grid = grid_from_lines(lines) if source == "ocr" else None
+    # 디지털 PDF 에서 우리가 글자 위치로 찾은 표(uncovered_table, 선 없는 "이름 / 값" 사양표)도 글자 줄로 칸을 만든다.
+    # 선이 없는 표는 구조 모델이 칸을 거의 못 나눈다
+    from_lines = source == "ocr" or block.get("label") == "uncovered_table"
+    line_grid = grid_from_lines(lines) if from_lines else None
+    force_lines = source == "text-layer" and line_grid is not None
 
     if structure_ok:
         per_cell, unassigned = assign_lines_to_cells(lines, cell_boxes)
@@ -148,7 +152,8 @@ def process_table_block(ctx: ProcessContext, block: dict) -> dict:
         cells, n_rows, n_cols, caption_cell = tidy_table(cells, n_rows, n_cols)
         cells, n_rows, head_extra, tail_extra = _strip_sparse_edge_rows(cells, n_rows)
     use_lines = line_grid is not None and (
-        not structure_ok
+        force_lines
+        or not structure_ok
         or not agrees
         # 다듬은 뒤에도 열 수가 글자 줄 표와 다르면(제목·배너까지 표로 잡아 열이 늘어난 경우) 글자 줄 표를 쓴다
         or n_cols != line_grid["n_cols"]

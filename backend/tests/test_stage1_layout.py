@@ -160,3 +160,43 @@ def test_real_layout_two_column_reading_order(tmp_path, settings, real_engines):
             if tag in words:
                 labels.append(tag)
     assert labels == ["LEFT-1", "LEFT-2", "LEFT-3", "RIGHT-1", "RIGHT-2", "RIGHT-3"], labels
+
+
+# ---------------- 디지털 PDF: 레이아웃 모델이 놓친 글자 / 잘못 묶은 블록 (볼보 사양 PDF 사례) ----------------
+
+
+def _rows_of(x_starts, y_top, n_rows, h=28, step=52, w=200):
+    return [[x, y_top + i * step, x + w, y_top + i * step + h] for i in range(n_rows) for x in x_starts]
+
+
+def test_uncovered_pdf_lines_become_blocks():
+    from app.pipeline.layout import uncovered_pdf_blocks
+
+    title = {"type": "title", "bbox": [120, 200, 300, 260]}
+    left_list = [[160, 400 + i * 52, 500, 428 + i * 52] for i in range(5)]  # 놓친 목록 5줄 (한 문단)
+    covered = [[130, 210, 280, 250]]  # 제목 안의 줄 → 새 블록이 되면 안 된다
+    found = uncovered_pdf_blocks(covered + left_list, [title])
+    assert [(b["type"], b["label"]) for b in found] == [("text", "uncovered_text")]
+    assert found[0]["bbox"] == [160, 400, 500, 636]
+
+
+def test_uncovered_pdf_spec_grid_becomes_table_but_two_column_list_does_not():
+    from app.pipeline.layout import uncovered_pdf_blocks
+
+    grid = _rows_of([120, 600, 1070], 560, 4, h=25, step=60)  # "이름 / 값" 3열 사양표
+    found = uncovered_pdf_blocks(grid, [])
+    assert [b["type"] for b in found] == ["table"]
+    two_col = _rows_of([160, 870], 400, 6)  # 2단 목록은 표가 아니다
+    assert {b["type"] for b in uncovered_pdf_blocks(two_col, [])} == {"text"}
+
+
+def test_overmerged_text_block_detection():
+    from app.pipeline.layout import _overmerged_text_block
+
+    lines = _rows_of([160, 870], 200, 10)
+    wide = {"type": "text", "bbox": [120, 180, 1400, 760]}  # 두 단을 한 블록으로 묶음
+    left = {"type": "text", "bbox": [120, 180, 400, 760]}
+    assert _overmerged_text_block(wide, lines, [wide])
+    assert not _overmerged_text_block(left, lines, [left])
+    inner = {"type": "title", "bbox": [150, 300, 300, 330]}
+    assert _overmerged_text_block(left, lines, [left, inner])  # 다른 블록을 품고 있다
