@@ -171,6 +171,13 @@ copy .env.example .env
 
 `frontend/.env` 의 `VITE_MAX_FILE_SIZE_MB` 는 backend 의 `MAX_FILE_SIZE_MB` 와 같게 맞춰 주세요.
 
+### PDF·PPT 내보내기
+
+결과 화면의 **PDF 다운로드**, **PPT 다운로드** 버튼 (`backend/app/pipeline/export.py`). 내용은 .txt/.md 와 같은 규칙(순서, `[추출 실패]` 표시, 사용자 수정 우선, 머리말·꼬리말 제외)을 따릅니다.
+
+- **PDF**: 글자가 그림이 아니라 진짜 글자로 들어가 선택·복사·검색·수정할 수 있습니다. 원본 페이지마다 새 A4 페이지에서 시작하고 제목·본문·표·그림을 위에서 아래로 다시 배치합니다. 한글은 PyMuPDF 에 들어 있는 글꼴을 쓰고, 쓴 글자만 넣어 파일을 줄입니다.
+- **PPT(.pptx)**: 원본 페이지 하나가 슬라이드 하나이고, 블록을 원본 위치에 글상자·PowerPoint 표·그림으로 놓아 바로 고칠 수 있습니다. 글자 크기는 원본 줄 높이로 어림하므로 PowerPoint 에서 조금 다듬어야 할 수 있습니다. 위치 정보가 없는 HWP 는 위에서부터 차례로 쌓습니다. 차트는 그림만 넣습니다 (값 표는 PDF·txt 에 있음).
+
 ### AI 도우미 (Ollama, 선택)
 
 결과 화면 오른쪽 위 **AI 도우미** 상자에서 문서 **요약**과 **오타 교정 제안**을 쓸 수 있습니다.
@@ -241,7 +248,7 @@ npm run dev
 | POST | `/api/documents/{doc_id}/blocks/{block_id}/retry` | 블록 하나 다시 처리 (번호 유지) |
 | PATCH | `/api/documents/{doc_id}/blocks/{block_id}` | `{"edited_text": "..."}` 사용자 수정 (null = 취소) |
 | GET | `/api/documents/{doc_id}/pages/{page}/image` | 원본 페이지 이미지 |
-| GET | `/api/documents/{doc_id}/result?format=txt\|md&page_separator=true&debug=false` | 최종 결과 |
+| GET | `/api/documents/{doc_id}/result?format=txt\|md\|pdf\|pptx&page_separator=true&debug=false` | 최종 결과. pdf·pptx 는 파일로 (아래 "PDF·PPT 내보내기") |
 | GET | `/api/assist/status` | Ollama 연결·모델 설치 여부 |
 | GET | `/api/documents/{doc_id}/assist` | 요약·교정 제안 결과와 진행 상태 |
 | POST | `/api/documents/{doc_id}/assist/summary` · `/assist/corrections` | 요약 / 교정 제안 시작 (202, 백그라운드) |

@@ -69,8 +69,19 @@ export default function ResultView({ docId, data, fileName, onRetry, onEdit, onR
   }
 
   const download = async (format) => {
-    const text = await fetchResult(format)
-    const blob = new Blob([text], { type: format === 'md' ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8' })
+    let blob
+    try {
+      if (format === 'pdf' || format === 'pptx') {
+        flash(`${format === 'pdf' ? 'PDF' : 'PPT'} 파일을 만드는 중...`)
+        blob = await api.resultFile(docId, format, { debug })
+      } else {
+        const text = await fetchResult(format)
+        blob = new Blob([text], { type: format === 'md' ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8' })
+      }
+    } catch (err) {
+      flash(`다운로드 실패: ${err.message}`)
+      return
+    }
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
     a.download = fileName.replace(/\.[^.]+$/, '') + '.' + format
@@ -99,6 +110,9 @@ export default function ResultView({ docId, data, fileName, onRetry, onEdit, onR
         <button onClick={copy}>복사</button>
         <button onClick={() => download('txt')}>.txt 다운로드</button>
         <button onClick={() => download('md')}>.md 다운로드</button>
+        {/* 글자를 선택·수정할 수 있는 PDF, 페이지마다 슬라이드 하나인 PowerPoint */}
+        <button onClick={() => download('pdf')} title="글자를 선택·복사·수정할 수 있는 PDF">PDF 다운로드</button>
+        <button onClick={() => download('pptx')} title="페이지마다 슬라이드 하나, 원본 위치에 글상자·표·그림">PPT 다운로드</button>
         {notice && <span className="notice">{notice}</span>}
       </div>
 

@@ -191,3 +191,30 @@ def test_hwpx_upload_flow(client, settings, tmp_path):
     md = client.get(f"/api/documents/{doc['doc_id']}/result", params={"format": "md"}).text
     assert "<table" not in md and "<td" not in md  # .md 에는 HTML 표를 섞지 않는다
     assert "| 구분 |" in md and "| 1분기 |" in md
+
+
+def test_result_pdf_and_pptx_downloads(client, tmp_path):
+    """편집 가능한 PDF(글자가 진짜 글자로 들어감)와 PowerPoint 내보내기. 실패 표시·사용자 수정도 같이 들어가야 한다."""
+    import io
+
+    import pymupdf
+    from pptx import Presentation
+
+    doc = _upload(client, samples.make_fake_page(tmp_path / "p.png"))
+    _wait(client, doc["doc_id"])
+    client.patch(f"/api/documents/{doc['doc_id']}/blocks/p1-b002", json={"edited_text": "고친 문단"})
+    base = f"/api/documents/{doc['doc_id']}/result"
+
+    r = client.get(base, params={"format": "pdf"})
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
+    text = "".join(page.get_text() for page in pymupdf.open("pdf", r.content))
+    assert "테스트 문서 제목" in text and "고친 문단" in text and "[추출 실패: p1-b003]" in text
+
+    r = client.get(base, params={"format": "pptx"})
+    assert r.status_code == 200 and "presentationml" in r.headers["content-type"]
+    prs = Presentation(io.BytesIO(r.content))
+    shapes_text = " ".join(s.text_frame.text for slide in prs.slides for s in slide.shapes if s.has_text_frame)
+    assert len(prs.slides) == 1 and "고친 문단" in shapes_text and "테스트 문서 제목" in shapes_text
+    assert any(s.has_table for slide in prs.slides for s in slide.shapes)  # 표는 PowerPoint 표로
+
+    assert client.get(base, params={"format": "docx"}).status_code == 400
